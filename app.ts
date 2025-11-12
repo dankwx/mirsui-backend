@@ -1,9 +1,11 @@
 import Fastify from 'fastify'
 import { supabase, Profile } from './supabase'
+import cors from '@fastify/cors'
 
 const fastify = Fastify({
   logger: true
 })
+
 
 // Rota inicial
 fastify.get('/', async (request, reply) => {
