@@ -333,6 +333,43 @@ fastify.post<{
   }
 })
 
+// Rota para verificar se o token é válido (usado pelo middleware)
+fastify.get('/auth/verify', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({
+        authenticated: false,
+        error: 'Token não fornecido'
+      })
+    }
+
+    const token = authHeader.substring(7)
+
+    const { data: { user }, error } = await supabase.auth.getUser(token)
+
+    if (error || !user) {
+      return reply.code(401).send({
+        authenticated: false,
+        error: 'Token inválido ou expirado'
+      })
+    }
+
+    return reply.send({
+      authenticated: true,
+      userId: user.id,
+      email: user.email
+    })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({
+      authenticated: false,
+      error: 'Erro ao verificar token.'
+    })
+  }
+})
+
 // Rota para verificar usuário logado (me)
 fastify.get('/auth/me', async (request, reply) => {
   try {
@@ -517,15 +554,17 @@ const start = async () => {
   try {
     await fastify.listen({ port: 3000, host: '0.0.0.0' })
     console.log('🚀 Backend Mirsui rodando em http://localhost:3000')
-    console.log('📋 Rotas disponíveis:')
-    console.log('   GET  /              - Health check')
-    console.log('   GET  /health        - Health check detalhado')
+    console.log('📋 Rotas de autenticação (100% backend):')
     console.log('   POST /auth/signup   - Criar conta')
     console.log('   POST /auth/login    - Fazer login')
     console.log('   POST /auth/logout   - Fazer logout')
+    console.log('   GET  /auth/verify   - Verificar token (middleware)')
+    console.log('   GET  /auth/me       - Dados do usuário logado')
     console.log('   POST /auth/refresh  - Renovar token')
     console.log('   POST /auth/reset-password - Recuperar senha')
-    console.log('   GET  /auth/me       - Verificar usuário logado')
+    console.log('📋 Outras rotas:')
+    console.log('   GET  /              - Health check')
+    console.log('   GET  /health        - Health check detalhado')
     console.log('   GET  /profiles      - Listar profiles')
     console.log('   GET  /profiles/:id  - Buscar profile por ID')
     console.log('   GET  /profiles/username/:username - Buscar por username')
