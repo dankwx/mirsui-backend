@@ -548,6 +548,214 @@ fastify.patch<{
   }
 })
 
+// ==================== ROTAS DO FEED ====================
+
+// Rota para buscar posts do feed com interações
+fastify.get<{
+  Querystring: { limit?: number; offset?: number }
+}>('/feed', async (request, reply) => {
+  try {
+    // Converter para número para evitar concatenação de strings
+    const limit = Number(request.query.limit) || 5
+    const offset = Number(request.query.offset) || 0
+
+    fastify.log.info({ limit, offset, rangeEnd: offset + limit - 1 }, 'Buscando posts do feed')
+
+    // Buscar tracks com claimedat não nulo
+    const { data: tracks, error: tracksError } = await supabase
+      .from('tracks')
+      .select(`
+        id,
+        track_url,
+        track_title,
+        artist_name,
+        album_name,
+        popularity,
+        track_thumbnail,
+        user_id,
+        position,
+        claimedat,
+        track_uri,
+        discover_rating,
+        claim_message,
+        youtube_url,
+        profiles:user_id!inner (
+          username,
+          display_name,
+          avatar_url
+        )
+      `)
+      .not('claimedat', 'is', null)
+      .order('claimedat', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    fastify.log.info({ tracksCount: tracks?.length || 0 }, 'Tracks retornados do Supabase')
+
+    if (tracksError) {
+      fastify.log.error({ err: tracksError }, 'Erro ao buscar posts do feed')
+      return reply.code(500).send({ error: 'Erro ao buscar feed' })
+    }
+
+    if (!tracks || tracks.length === 0) {
+      return reply.send({ posts: [], total: 0 })
+    }
+
+    // Buscar contadores de likes e comentários
+    const trackIds = tracks.map((track: any) => track.id)
+
+    const [likesResult, commentsResult] = await Promise.all([
+      supabase
+        .from('track_likes')
+        .select('track_id')
+        .in('track_id', trackIds),
+      supabase
+        .from('track_comments')
+        .select('track_id')
+        .in('track_id', trackIds)
+    ])
+
+    // Contar likes por track
+    const likesCountByTrack: Record<number, number> = (likesResult.data || []).reduce((acc: Record<number, number>, like: any) => {
+      acc[like.track_id] = (acc[like.track_id] || 0) + 1
+      return acc
+    }, {})
+
+    // Contar comentários por track
+    const commentsCountByTrack: Record<number, number> = (commentsResult.data || []).reduce((acc: Record<number, number>, comment: any) => {
+      acc[comment.track_id] = (acc[comment.track_id] || 0) + 1
+      return acc
+    }, {})
+
+    // Processar dados finais
+    const postsWithInteractions = tracks.map((track: any) => {
+      const profile = track.profiles
+
+      return {
+        id: track.id,
+        track_url: track.track_url,
+        track_title: track.track_title,
+        artist_name: track.artist_name,
+        album_name: track.album_name,
+        popularity: track.popularity,
+        track_thumbnail: track.track_thumbnail,
+        user_id: track.user_id,
+        position: track.position,
+        claimedat: track.claimedat,
+        track_uri: track.track_uri,
+        discover_rating: track.discover_rating,
+        claim_message: track.claim_message,
+        youtube_url: track.youtube_url,
+        username: profile?.username || '',
+        display_name: profile?.display_name || null,
+        avatar_url: profile?.avatar_url || null,
+        likes_count: likesCountByTrack[track.id] || 0,
+        comments_count: commentsCountByTrack[track.id] || 0
+      }
+    })
+
+    return reply.send({ 
+      posts: postsWithInteractions, 
+      total: postsWithInteractions.length 
+    })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro ao buscar feed' })
+  }
+})
+
+// Rota para buscar reivindicações recentes (sem duplicatas)
+fastify.get<{
+  Querystring: { limit?: number }
+}>('/feed/recent-claims', async (request, reply) => {
+  try {
+    const { limit = 4 } = request.query
+
+    // Buscar mais reivindicações para filtrar duplicatas
+    const { data, error } = await supabase
+      .from('tracks')
+      .select('id, track_title, artist_name, track_thumbnail, track_url, claimedat, track_uri')
+      .not('claimedat', 'is', null)
+      .order('claimedat', { ascending: false })
+      .limit(limit * 5)
+
+    if (error) {
+      fastify.log.error({ err: error }, 'Erro ao buscar reivindicações recentes')
+      return reply.code(500).send({ error: 'Erro ao buscar reivindicações recentes' })
+    }
+
+    if (!data) {
+      return reply.send({ claims: [] })
+    }
+
+    // Filtrar músicas únicas baseado no track_uri
+    const uniqueTracks = new Map<string, any>()
+
+    for (const track of data) {
+      if (track.track_uri && !uniqueTracks.has(track.track_uri)) {
+        uniqueTracks.set(track.track_uri, {
+          id: track.id,
+          track_title: track.track_title,
+          artist_name: track.artist_name,
+          track_thumbnail: track.track_thumbnail,
+          track_url: track.track_url,
+          claimedat: track.claimedat
+        })
+      }
+
+      if (uniqueTracks.size >= limit) break
+    }
+
+    return reply.send({ claims: Array.from(uniqueTracks.values()) })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro ao buscar reivindicações recentes' })
+  }
+})
+
+// Rota para buscar likes do usuário em tracks específicos
+fastify.post<{
+  Body: { track_ids: number[] }
+}>('/feed/user-likes', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.send({ liked_tracks: [] })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.send({ liked_tracks: [] })
+    }
+
+    const { track_ids } = request.body
+
+    if (!track_ids || track_ids.length === 0) {
+      return reply.send({ liked_tracks: [] })
+    }
+
+    const { data, error } = await supabase
+      .from('track_likes')
+      .select('track_id')
+      .eq('user_id', user.id)
+      .in('track_id', track_ids)
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id }, 'Erro ao buscar likes do usuário')
+      return reply.send({ liked_tracks: [] })
+    }
+
+    const likedTrackIds = (data || []).map((like: any) => like.track_id)
+
+    return reply.send({ liked_tracks: likedTrackIds })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro ao buscar likes do usuário' })
+  }
+})
+
 // ==================== INICIAR SERVIDOR ====================
 
 const start = async () => {
@@ -562,6 +770,10 @@ const start = async () => {
     console.log('   GET  /auth/me       - Dados do usuário logado')
     console.log('   POST /auth/refresh  - Renovar token')
     console.log('   POST /auth/reset-password - Recuperar senha')
+    console.log('📋 Rotas do Feed:')
+    console.log('   GET  /feed          - Buscar posts do feed')
+    console.log('   GET  /feed/recent-claims - Buscar reivindicações recentes')
+    console.log('   POST /feed/user-likes - Verificar likes do usuário')
     console.log('📋 Outras rotas:')
     console.log('   GET  /              - Health check')
     console.log('   GET  /health        - Health check detalhado')
