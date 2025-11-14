@@ -756,6 +756,449 @@ fastify.post<{
   }
 })
 
+// ==================== ROTAS DE TRACKS ====================
+
+// Dar like em uma track
+fastify.post<{
+  Params: { id: string }
+}>('/tracks/:id/like', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const trackId = parseInt(request.params.id)
+
+    // Inserir like
+    const { error } = await supabase
+      .from('track_likes')
+      .insert({ 
+        track_id: trackId,
+        user_id: user.id
+      })
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id, trackId }, 'Erro ao dar like')
+      return reply.code(400).send({ error: error.message })
+    }
+
+    fastify.log.info({ userId: user.id, trackId }, 'Like adicionado')
+    return reply.send({ success: true })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// Remover like de uma track
+fastify.delete<{
+  Params: { id: string }
+}>('/tracks/:id/like', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const trackId = parseInt(request.params.id)
+
+    // Remover like
+    const { error } = await supabase
+      .from('track_likes')
+      .delete()
+      .eq('track_id', trackId)
+      .eq('user_id', user.id)
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id, trackId }, 'Erro ao remover like')
+      return reply.code(400).send({ error: error.message })
+    }
+
+    fastify.log.info({ userId: user.id, trackId }, 'Like removido')
+    return reply.send({ success: true })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// Buscar comentários de uma track
+fastify.get<{
+  Params: { id: string }
+}>('/tracks/:id/comments', async (request, reply) => {
+  try {
+    const trackId = parseInt(request.params.id)
+
+    const { data, error } = await supabase
+      .from('track_comments')
+      .select(`
+        id,
+        comment_text,
+        created_at,
+        user_id,
+        profiles:user_id (
+          username,
+          display_name,
+          avatar_url
+        )
+      `)
+      .eq('track_id', trackId)
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      fastify.log.error({ err: error, trackId }, 'Erro ao buscar comentários')
+      return reply.code(500).send({ error: error.message })
+    }
+
+    return reply.send({ comments: data || [] })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// Criar comentário em uma track
+fastify.post<{
+  Params: { id: string }
+  Body: { comment: string }
+}>('/tracks/:id/comments', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const trackId = parseInt(request.params.id)
+    const { comment } = request.body
+
+    if (!comment || comment.trim().length === 0) {
+      return reply.code(400).send({ error: 'Comentário não pode estar vazio' })
+    }
+
+    // Inserir comentário
+    const { data, error } = await supabase
+      .from('track_comments')
+      .insert({
+        track_id: trackId,
+        user_id: user.id,
+        comment_text: comment.trim()
+      })
+      .select(`
+        id,
+        comment_text,
+        created_at,
+        user_id,
+        profiles:user_id (
+          username,
+          display_name,
+          avatar_url
+        )
+      `)
+      .single()
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id, trackId }, 'Erro ao criar comentário')
+      return reply.code(400).send({ error: error.message })
+    }
+
+    fastify.log.info({ userId: user.id, trackId, commentId: data.id }, 'Comentário criado')
+    return reply.send({ comment: data })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// Deletar comentário
+fastify.delete<{
+  Params: { commentId: string }
+}>('/comments/:commentId', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const commentId = parseInt(request.params.commentId)
+
+    // Verificar se o comentário pertence ao usuário
+    const { data: comment, error: fetchError } = await supabase
+      .from('track_comments')
+      .select('user_id')
+      .eq('id', commentId)
+      .single()
+
+    if (fetchError || !comment) {
+      return reply.code(404).send({ error: 'Comentário não encontrado' })
+    }
+
+    if (comment.user_id !== user.id) {
+      return reply.code(403).send({ error: 'Não autorizado a deletar este comentário' })
+    }
+
+    // Deletar comentário
+    const { error } = await supabase
+      .from('track_comments')
+      .delete()
+      .eq('id', commentId)
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id, commentId }, 'Erro ao deletar comentário')
+      return reply.code(400).send({ error: error.message })
+    }
+
+    fastify.log.info({ userId: user.id, commentId }, 'Comentário deletado')
+    return reply.send({ success: true })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// ==================== ROTAS DE USUÁRIO ====================
+
+// Buscar pontos do usuário
+fastify.get('/user/points', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    // Buscar pontos do usuário
+    const { data: points, error } = await supabase
+      .rpc('get_user_points', { user_uuid: user.id })
+
+    if (error) {
+      fastify.log.error({ err: error, userId: user.id }, 'Erro ao buscar pontos')
+      return reply.code(500).send({ error: 'Erro ao buscar pontos do usuário' })
+    }
+
+    return reply.send({ 
+      points: points || 0,
+      userId: user.id 
+    })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// ==================== ROTAS DE CLAIM ====================
+
+// Reivindicar uma música
+fastify.post<{
+  Body: {
+    trackUri: string
+    trackName: string
+    artistName: string
+    albumName: string
+    spotifyUrl: string
+    trackThumbnail: string
+    popularity: number
+    duration_ms?: number
+    claimMessage?: string
+  }
+}>('/tracks/claim', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const {
+      trackUri,
+      trackName,
+      artistName,
+      albumName,
+      spotifyUrl,
+      trackThumbnail,
+      popularity,
+      duration_ms,
+      claimMessage
+    } = request.body
+
+    // Validações
+    if (!trackUri || !trackName || !artistName) {
+      return reply.code(400).send({ error: 'Dados da música são obrigatórios' })
+    }
+
+    // Verificar se o usuário já reivindicou esta música
+    const { data: existingClaim, error: existingError } = await supabase
+      .from('tracks')
+      .select('id, position, youtube_url')
+      .eq('user_id', user.id)
+      .eq('track_uri', trackUri)
+      .single()
+
+    if (existingError && existingError.code !== 'PGRST116') {
+      fastify.log.error({ err: existingError }, 'Erro ao verificar claim existente')
+      return reply.code(500).send({ error: 'Erro ao verificar reivindicação' })
+    }
+
+    if (existingClaim) {
+      return reply.code(409).send({
+        error: 'Você já reivindicou esta música',
+        position: existingClaim.position,
+        youtubeUrl: existingClaim.youtube_url
+      })
+    }
+
+    // Contar quantas vezes esta música foi reivindicada
+    const { count: trackCount, error: countError } = await supabase
+      .from('tracks')
+      .select('*', { count: 'exact' })
+      .eq('track_uri', trackUri)
+
+    if (countError) {
+      fastify.log.error({ err: countError }, 'Erro ao contar claims')
+      return reply.code(500).send({ error: 'Erro ao processar reivindicação' })
+    }
+
+    // A próxima posição será a contagem atual + 1
+    const nextPosition = trackCount !== null ? trackCount + 1 : 1
+
+    // Calcular discover_rating
+    const discoverRating = 100 - popularity + 100 / nextPosition
+
+    // Inserir claim no banco
+    const insertData: any = {
+      track_url: spotifyUrl,
+      track_uri: trackUri,
+      track_title: trackName,
+      artist_name: artistName,
+      album_name: albumName,
+      popularity: popularity || 0,
+      discover_rating: discoverRating,
+      track_thumbnail: trackThumbnail,
+      user_id: user.id,
+      position: nextPosition,
+      claimedat: new Date().toISOString()
+    }
+
+    if (claimMessage && claimMessage.trim()) {
+      insertData.claim_message = claimMessage.trim()
+    }
+
+    const { data: insertedTrack, error: insertError } = await supabase
+      .from('tracks')
+      .insert([insertData])
+      .select('id, position, youtube_url')
+      .single()
+
+    if (insertError) {
+      fastify.log.error({ err: insertError, userId: user.id }, 'Erro ao inserir claim')
+      return reply.code(500).send({ error: 'Erro ao salvar reivindicação' })
+    }
+
+    fastify.log.info({
+      userId: user.id,
+      trackUri,
+      position: nextPosition
+    }, 'Música reivindicada com sucesso')
+
+    return reply.code(201).send({
+      success: true,
+      message: 'Música reivindicada com sucesso!',
+      position: nextPosition,
+      youtubeUrl: insertedTrack?.youtube_url || null,
+      data: insertedTrack
+    })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
+// Verificar status de claim de uma música
+fastify.get<{
+  Querystring: { trackUri: string }
+}>('/tracks/claim/status', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token não fornecido' })
+    }
+
+    const token = authHeader.substring(7)
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+
+    if (authError || !user) {
+      return reply.code(401).send({ error: 'Usuário não autenticado' })
+    }
+
+    const { trackUri } = request.query
+
+    if (!trackUri) {
+      return reply.code(400).send({ error: 'trackUri é obrigatório' })
+    }
+
+    const { data: claim, error } = await supabase
+      .from('tracks')
+      .select('position, youtube_url')
+      .eq('user_id', user.id)
+      .eq('track_uri', trackUri)
+      .single()
+
+    if (error && error.code !== 'PGRST116') {
+      fastify.log.error({ err: error }, 'Erro ao verificar claim')
+      return reply.code(500).send({ error: 'Erro ao verificar claim' })
+    }
+
+    return reply.send({
+      claimed: !!claim,
+      position: claim?.position || null,
+      youtubeUrl: claim?.youtube_url || null
+    })
+  } catch (err: any) {
+    fastify.log.error(err)
+    return reply.code(500).send({ error: 'Erro interno do servidor' })
+  }
+})
+
 // ==================== INICIAR SERVIDOR ====================
 
 const start = async () => {
@@ -774,6 +1217,18 @@ const start = async () => {
     console.log('   GET  /feed          - Buscar posts do feed')
     console.log('   GET  /feed/recent-claims - Buscar reivindicações recentes')
     console.log('   POST /feed/user-likes - Verificar likes do usuário')
+    console.log('📋 Rotas de Tracks:')
+    console.log('   POST /tracks/:id/like - Dar like em uma track')
+    console.log('   DELETE /tracks/:id/like - Remover like de uma track')
+    console.log('   GET  /tracks/:id/comments - Buscar comentários de uma track')
+    console.log('   POST /tracks/:id/comments - Criar comentário em uma track')
+    console.log('📋 Rotas de Comentários:')
+    console.log('   DELETE /comments/:commentId - Deletar comentário')
+    console.log('📋 Rotas de Usuário:')
+    console.log('   GET  /user/points - Buscar pontos do usuário')
+    console.log('📋 Rotas de Claim:')
+    console.log('   POST /tracks/claim - Reivindicar uma música')
+    console.log('   GET  /tracks/claim/status - Verificar status de claim')
     console.log('📋 Outras rotas:')
     console.log('   GET  /              - Health check')
     console.log('   GET  /health        - Health check detalhado')
