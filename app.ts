@@ -817,20 +817,43 @@ fastify.delete<{
 
     const trackId = parseInt(request.params.id)
 
-    // Remover like
-    const { error } = await supabase
+    fastify.log.info({ userId: user.id, trackId }, 'Tentando remover like')
+
+    // Primeiro verificar se o like existe
+    const { data: existingLike, error: findError } = await supabase
+      .from('track_likes')
+      .select('id')
+      .eq('track_id', trackId)
+      .eq('user_id', user.id)
+      .maybeSingle()
+
+    if (findError) {
+      fastify.log.error({ err: findError, userId: user.id, trackId }, 'Erro ao buscar like')
+      return reply.code(500).send({ error: 'Erro ao buscar like' })
+    }
+
+    if (!existingLike) {
+      fastify.log.warn({ userId: user.id, trackId }, 'Like não encontrado para remover')
+      return reply.code(404).send({ error: 'Like não encontrado' })
+    }
+
+    fastify.log.info({ userId: user.id, trackId, likeId: existingLike.id }, 'Like encontrado, removendo...')
+
+    // Agora remover o like
+    const { data: deletedData, error: deleteError } = await supabase
       .from('track_likes')
       .delete()
       .eq('track_id', trackId)
       .eq('user_id', user.id)
+      .select()
 
-    if (error) {
-      fastify.log.error({ err: error, userId: user.id, trackId }, 'Erro ao remover like')
-      return reply.code(400).send({ error: error.message })
+    if (deleteError) {
+      fastify.log.error({ err: deleteError, userId: user.id, trackId }, 'Erro ao remover like')
+      return reply.code(400).send({ error: deleteError.message })
     }
 
-    fastify.log.info({ userId: user.id, trackId }, 'Like removido')
-    return reply.send({ success: true })
+    fastify.log.info({ userId: user.id, trackId, deletedData }, 'Like removido com sucesso')
+    return reply.send({ success: true, deleted: deletedData })
   } catch (err: any) {
     fastify.log.error(err)
     return reply.code(500).send({ error: 'Erro interno do servidor' })
@@ -843,6 +866,7 @@ fastify.get<{
 }>('/tracks/:id/comments', async (request, reply) => {
   try {
     const trackId = parseInt(request.params.id)
+    fastify.log.info({ trackId }, 'Buscando comentários da track')
 
     const { data, error } = await supabase
       .from('track_comments')
@@ -851,6 +875,7 @@ fastify.get<{
         comment_text,
         created_at,
         user_id,
+        track_id,
         profiles:user_id (
           username,
           display_name,
@@ -865,7 +890,25 @@ fastify.get<{
       return reply.code(500).send({ error: error.message })
     }
 
-    return reply.send({ comments: data || [] })
+    // Formatar comentários para o formato esperado pelo frontend
+    const formattedComments = (data || []).map((comment: any) => {
+      const profile = comment.profiles
+      return {
+        id: comment.id,
+        track_id: comment.track_id,
+        user_id: comment.user_id,
+        comment_text: comment.comment_text,
+        created_at: comment.created_at,
+        updated_at: comment.created_at,
+        username: profile?.username || '',
+        display_name: profile?.display_name || null,
+        avatar_url: profile?.avatar_url || null
+      }
+    })
+
+    fastify.log.info({ trackId, count: formattedComments.length }, 'Comentários encontrados')
+
+    return reply.send({ comments: formattedComments })
   } catch (err: any) {
     fastify.log.error(err)
     return reply.code(500).send({ error: 'Erro interno do servidor' })
@@ -880,6 +923,7 @@ fastify.post<{
   try {
     const authHeader = request.headers.authorization
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      fastify.log.warn('Token não fornecido no header')
       return reply.code(401).send({ error: 'Token não fornecido' })
     }
 
@@ -887,11 +931,14 @@ fastify.post<{
     const { data: { user }, error: authError } = await supabase.auth.getUser(token)
 
     if (authError || !user) {
+      fastify.log.warn({ err: authError }, 'Usuário não autenticado')
       return reply.code(401).send({ error: 'Usuário não autenticado' })
     }
 
     const trackId = parseInt(request.params.id)
     const { comment } = request.body
+
+    fastify.log.info({ userId: user.id, trackId, comment }, 'Criando comentário')
 
     if (!comment || comment.trim().length === 0) {
       return reply.code(400).send({ error: 'Comentário não pode estar vazio' })
@@ -910,6 +957,7 @@ fastify.post<{
         comment_text,
         created_at,
         user_id,
+        track_id,
         profiles:user_id (
           username,
           display_name,
@@ -923,8 +971,22 @@ fastify.post<{
       return reply.code(400).send({ error: error.message })
     }
 
-    fastify.log.info({ userId: user.id, trackId, commentId: data.id }, 'Comentário criado')
-    return reply.send({ comment: data })
+    // Formatar resposta no formato esperado pelo frontend
+    const profile = data.profiles
+    const formattedComment = {
+      id: data.id,
+      track_id: data.track_id,
+      user_id: data.user_id,
+      comment_text: data.comment_text,
+      created_at: data.created_at,
+      updated_at: data.created_at,
+      username: profile?.username || '',
+      display_name: profile?.display_name || null,
+      avatar_url: profile?.avatar_url || null
+    }
+
+    fastify.log.info({ userId: user.id, trackId, commentId: data.id }, 'Comentário criado com sucesso')
+    return reply.send({ comment: formattedComment })
   } catch (err: any) {
     fastify.log.error(err)
     return reply.code(500).send({ error: 'Erro interno do servidor' })
