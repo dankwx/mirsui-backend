@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
-import { supabase } from '../lib/supabase'
+import { supabase, supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 
 const COMMENT_SELECT = `
@@ -48,7 +48,7 @@ export default async function trackRoutes(app: FastifyInstance) {
     const trackId = parseId(request.params.id, reply, 'ID da track')
     if (trackId === null) return
 
-    const { error } = await supabase
+    const { error } = await supabaseForUser(request.accessToken)
       .from('track_likes')
       .insert({ track_id: trackId, user_id: request.user.id })
 
@@ -68,7 +68,7 @@ export default async function trackRoutes(app: FastifyInstance) {
     const trackId = parseId(request.params.id, reply, 'ID da track')
     if (trackId === null) return
 
-    const { data: deletedData, error } = await supabase
+    const { data: deletedData, error } = await supabaseForUser(request.accessToken)
       .from('track_likes')
       .delete()
       .eq('track_id', trackId)
@@ -123,7 +123,7 @@ export default async function trackRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Comentário não pode estar vazio' })
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseForUser(request.accessToken)
       .from('track_comments')
       .insert({
         track_id: trackId,
@@ -163,7 +163,7 @@ export default async function trackRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: 'Não autorizado a deletar este comentário' })
     }
 
-    const { error } = await supabase
+    const { error } = await supabaseForUser(request.accessToken)
       .from('track_comments')
       .delete()
       .eq('id', commentId)

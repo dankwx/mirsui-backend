@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase'
 declare module 'fastify' {
   interface FastifyRequest {
     user: User
+    accessToken: string
   }
 }
 
@@ -37,4 +38,5 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
   }
 
   request.user = user
+  request.accessToken = token
 }

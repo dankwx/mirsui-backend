@@ -1,16 +1,20 @@
 import type { FastifyInstance } from 'fastify'
-import { supabase, Profile } from '../lib/supabase'
+import { supabase, supabaseForUser, Profile } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 
 // Campos que o próprio usuário pode editar — rating/points ficam de fora
 const EDITABLE_FIELDS = ['username', 'description', 'display_name', 'avatar_url'] as const
+
+// Campos visíveis publicamente — email fica de fora
+const PUBLIC_PROFILE_FIELDS =
+  'id, username, display_name, avatar_url, description, rating, points, prophet_points'
 
 export default async function profileRoutes(app: FastifyInstance) {
   // Listar todos os profiles
   app.get('/profiles', async (request, reply) => {
     const { data, error } = await supabase
       .from('profiles')
-      .select('*')
+      .select(PUBLIC_PROFILE_FIELDS)
       .order('rating', { ascending: false })
 
     if (error) {
@@ -27,7 +31,7 @@ export default async function profileRoutes(app: FastifyInstance) {
 
     const { data, error } = await supabase
       .from('profiles')
-      .select('*')
+      .select(PUBLIC_PROFILE_FIELDS)
       .eq('id', id)
       .single()
 
@@ -45,7 +49,7 @@ export default async function profileRoutes(app: FastifyInstance) {
 
     const { data, error } = await supabase
       .from('profiles')
-      .select('*')
+      .select(PUBLIC_PROFILE_FIELDS)
       .eq('username', username)
       .single()
 
@@ -79,11 +83,11 @@ export default async function profileRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Nenhum campo válido para atualizar' })
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseForUser(request.accessToken)
       .from('profiles')
       .update(updateData)
       .eq('id', id)
-      .select()
+      .select(PUBLIC_PROFILE_FIELDS)
       .single()
 
     if (error) {

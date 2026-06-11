@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { supabase } from '../lib/supabase'
+import { supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 
 export default async function claimRoutes(app: FastifyInstance) {
@@ -33,6 +33,7 @@ export default async function claimRoutes(app: FastifyInstance) {
     }
 
     const userId = request.user.id
+    const supabase = supabaseForUser(request.accessToken)
 
     // Verificar se o usuário já reivindicou esta música
     const { data: existingClaim, error: existingError } = await supabase
@@ -120,6 +121,7 @@ export default async function claimRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'trackUri é obrigatório' })
     }
 
+    const supabase = supabaseForUser(request.accessToken)
     const { data: claim, error } = await supabase
       .from('tracks')
       .select('position, youtube_url')

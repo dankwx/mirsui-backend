@@ -35,8 +35,9 @@ export async function buildApp() {
     timeWindow: '15 minutes'
   })
 
-  // request.user é populado pelo preHandler requireAuth (src/plugins/auth.ts)
+  // request.user e request.accessToken são populados pelo preHandler requireAuth (src/plugins/auth.ts)
   app.decorateRequest('user', null as unknown as User)
+  app.decorateRequest('accessToken', '')
 
   // Tratamento centralizado de erros inesperados — substitui os try/catch por rota
   app.setErrorHandler((error: FastifyError, request, reply) => {

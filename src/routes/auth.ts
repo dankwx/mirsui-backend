@@ -159,10 +159,19 @@ export default async function authRoutes(app: FastifyInstance) {
     const token = extractToken(request)
 
     if (token) {
-      const { error } = await supabase.auth.admin.signOut(token)
-      if (error) {
+      // auth.admin.signOut exige a service_role key; com a anon key usamos
+      // o endpoint de logout do GoTrue autenticado com o token do próprio usuário
+      const response = await fetch(`${process.env.SUPABASE_URL}/auth/v1/logout`, {
+        method: 'POST',
+        headers: {
+          apikey: process.env.SUPABASE_KEY as string,
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (!response.ok) {
         // Mesmo com erro, retorna sucesso para o cliente
-        app.log.error({ err: error }, 'Erro ao fazer logout no Supabase')
+        app.log.error({ status: response.status }, 'Erro ao fazer logout no Supabase')
       } else {
         app.log.info('Logout realizado com sucesso')
       }
@@ -224,9 +233,10 @@ export default async function authRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
     }
 
+    // email não vem da tabela profiles (coluna restrita) — já está em user.email
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('*')
+      .select('id, username, description, display_name, avatar_url, rating, points, prophet_points')
       .eq('id', user.id)
       .single()
 
