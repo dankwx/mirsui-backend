@@ -1,16 +1,17 @@
 import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
 
-// Carrega variáveis de ambiente
 dotenv.config()
 
-const supabaseUrl = process.env.SUPABASE_URL!
-const supabaseKey = process.env.SUPABASE_KEY!
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_KEY
 
-// Cria e exporta o cliente Supabase
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error('SUPABASE_URL e SUPABASE_KEY são obrigatórias. Verifique seu arquivo .env')
+}
+
 export const supabase = createClient(supabaseUrl, supabaseKey)
 
-// Interface para o tipo Profile
 export interface Profile {
   id: string
   email: string | null
