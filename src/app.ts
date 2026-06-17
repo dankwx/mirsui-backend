@@ -7,7 +7,6 @@ import healthRoutes from './routes/health'
 import authRoutes from './routes/auth'
 import profileRoutes from './routes/profiles'
 import feedRoutes from './routes/feed'
-import trackRoutes from './routes/tracks'
 import claimRoutes from './routes/claims'
 import userRoutes from './routes/user'
 
@@ -53,7 +52,6 @@ export async function buildApp() {
   await app.register(authRoutes)
   await app.register(profileRoutes)
   await app.register(feedRoutes)
-  await app.register(trackRoutes)
   await app.register(claimRoutes)
   await app.register(userRoutes)
 
