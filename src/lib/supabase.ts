@@ -34,6 +34,4 @@ export interface Profile {
   display_name: string | null
   avatar_url: string | null
   rating: number
-  points: number
-  prophet_points: number | null
 }

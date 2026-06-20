@@ -236,7 +236,7 @@ export default async function authRoutes(app: FastifyInstance) {
     // email não vem da tabela profiles (coluna restrita) — já está em user.email
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('id, username, description, display_name, avatar_url, rating, points, prophet_points')
+      .select('id, username, description, display_name, avatar_url, rating')
       .eq('id', user.id)
       .single()
 

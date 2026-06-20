@@ -8,7 +8,6 @@ import authRoutes from './routes/auth'
 import profileRoutes from './routes/profiles'
 import feedRoutes from './routes/feed'
 import claimRoutes from './routes/claims'
-import userRoutes from './routes/user'
 
 export async function buildApp() {
   const app = Fastify({ logger: true })
@@ -53,7 +52,6 @@ export async function buildApp() {
   await app.register(profileRoutes)
   await app.register(feedRoutes)
   await app.register(claimRoutes)
-  await app.register(userRoutes)
 
   return app
 }

@@ -7,7 +7,7 @@ const EDITABLE_FIELDS = ['username', 'description', 'display_name', 'avatar_url'
 
 // Campos visíveis publicamente — email fica de fora
 const PUBLIC_PROFILE_FIELDS =
-  'id, username, display_name, avatar_url, description, rating, points, prophet_points'
+  'id, username, display_name, avatar_url, description, rating'
 
 export default async function profileRoutes(app: FastifyInstance) {
   // Listar todos os profiles
