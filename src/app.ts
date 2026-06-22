@@ -8,6 +8,7 @@ import authRoutes from './routes/auth'
 import profileRoutes from './routes/profiles'
 import feedRoutes from './routes/feed'
 import claimRoutes from './routes/claims'
+import cravadaRoutes from './routes/cravadas'
 
 export async function buildApp() {
   const app = Fastify({ logger: true })
@@ -52,6 +53,7 @@ export async function buildApp() {
   await app.register(profileRoutes)
   await app.register(feedRoutes)
   await app.register(claimRoutes)
+  await app.register(cravadaRoutes)
 
   return app
 }
