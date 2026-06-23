@@ -2,20 +2,20 @@ import type { FastifyInstance } from 'fastify'
 import { supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 import { resolveTrack } from '../lib/deezer'
-import { computeMultiplier, popScore, fameScore } from '../lib/cravadaPoints'
+import { computeMultiplier, popScore, fameScore } from '../lib/stakePoints'
 
 const MAX_SLOTS = 3
 const MIN_DAYS_TO_COLLECT = 7
 
-function daysHeld(cravedAt: string): number {
-  const ms = Date.now() - new Date(cravedAt).getTime()
+function daysHeld(stakedAt: string): number {
+  const ms = Date.now() - new Date(stakedAt).getTime()
   return Math.floor(ms / (1000 * 60 * 60 * 24))
 }
 
-export default async function cravadaRoutes(app: FastifyInstance) {
-  // ---- Prévia do multiplicador (antes de cravar) ----
+export default async function stakeRoutes(app: FastifyInstance) {
+  // ---- Prévia do multiplicador (antes de dar stake) ----
   app.get<{ Querystring: { isrc?: string; artist?: string; title?: string } }>(
-    '/cravadas/preview',
+    '/stakes/preview',
     { preHandler: requireAuth },
     async (request, reply) => {
       const { isrc, artist, title } = request.query
@@ -39,29 +39,29 @@ export default async function cravadaRoutes(app: FastifyInstance) {
     }
   )
 
-  // ---- Listar as cravadas do usuário ----
-  app.get('/cravadas', { preHandler: requireAuth }, async (request, reply) => {
+  // ---- Listar os stakes do usuário ----
+  app.get('/stakes', { preHandler: requireAuth }, async (request, reply) => {
     const supabase = supabaseForUser(request.accessToken)
 
-    const { data: cravadas, error } = await supabase
-      .from('cravadas')
+    const { data: stakes, error } = await supabase
+      .from('stakes')
       .select('*')
       .eq('user_id', request.user.id)
       .neq('status', 'coletada')
-      .order('craved_at', { ascending: true })
+      .order('staked_at', { ascending: true })
 
     if (error) {
-      app.log.error({ err: error }, 'Erro ao listar cravadas')
-      return reply.code(500).send({ error: 'Erro ao listar cravadas' })
+      app.log.error({ err: error }, 'Erro ao listar stakes')
+      return reply.code(500).send({ error: 'Erro ao listar stakes' })
     }
 
-    const list = cravadas ?? []
+    const list = stakes ?? []
 
-    // Contagem social ("X pessoas cravaram") via função SECURITY DEFINER
+    // Contagem social ("X pessoas deram stake") via função SECURITY DEFINER
     const uris = Array.from(new Set(list.map((c) => c.track_uri)))
     const countByUri = new Map<string, number>()
     if (uris.length > 0) {
-      const { data: counts } = await supabase.rpc('count_cravadas_by_track_uri', {
+      const { data: counts } = await supabase.rpc('count_stakes_by_track_uri', {
         p_uris: uris,
       })
       for (const row of counts ?? []) {
@@ -70,20 +70,20 @@ export default async function cravadaRoutes(app: FastifyInstance) {
     }
 
     const result = list.map((c) => {
-      const held = daysHeld(c.craved_at)
+      const held = daysHeld(c.staked_at)
       return {
         ...c,
         days_held: held,
         days_to_collect: Math.max(0, MIN_DAYS_TO_COLLECT - held),
         can_collect: c.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT,
-        pessoas_cravaram: countByUri.get(c.track_uri) ?? 1,
+        pessoas_deram_stake: countByUri.get(c.track_uri) ?? 1,
       }
     })
 
-    return reply.send({ cravadas: result, maxSlots: MAX_SLOTS })
+    return reply.send({ stakes: result, maxSlots: MAX_SLOTS })
   })
 
-  // ---- Cravar uma faixa ----
+  // ---- Dar stake numa faixa ----
   app.post<{
     Body: {
       trackId: string // id do Spotify (referência/UI)
@@ -94,7 +94,7 @@ export default async function cravadaRoutes(app: FastifyInstance) {
       trackThumbnail?: string
       isrc?: string
     }
-  }>('/cravadas', { preHandler: requireAuth }, async (request, reply) => {
+  }>('/stakes', { preHandler: requireAuth }, async (request, reply) => {
     const {
       trackId,
       trackUri,
@@ -112,25 +112,25 @@ export default async function cravadaRoutes(app: FastifyInstance) {
     const userId = request.user.id
     const supabase = supabaseForUser(request.accessToken)
 
-    // Limite de 3 vagas (cravadas ativas)
+    // Limite de 3 vagas (stakes ativos)
     const { count: activeCount, error: countError } = await supabase
-      .from('cravadas')
+      .from('stakes')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('status', 'ativa')
 
     if (countError) {
-      app.log.error({ err: countError }, 'Erro ao contar cravadas')
-      return reply.code(500).send({ error: 'Erro ao processar cravada' })
+      app.log.error({ err: countError }, 'Erro ao contar stakes')
+      return reply.code(500).send({ error: 'Erro ao processar stake' })
     }
 
     if ((activeCount ?? 0) >= MAX_SLOTS) {
       return reply.code(409).send({ error: 'Você já usou suas 3 vagas' })
     }
 
-    // Não deixa cravar a mesma faixa duas vezes (ativa)
+    // Não deixa dar stake na mesma faixa duas vezes (ativa)
     const { data: dup } = await supabase
-      .from('cravadas')
+      .from('stakes')
       .select('id')
       .eq('user_id', userId)
       .eq('track_uri', trackUri)
@@ -138,7 +138,7 @@ export default async function cravadaRoutes(app: FastifyInstance) {
       .maybeSingle()
 
     if (dup) {
-      return reply.code(409).send({ error: 'Você já cravou essa faixa' })
+      return reply.code(409).send({ error: 'Você já deu stake nessa faixa' })
     }
 
     // Mede no Deezer: popularidade da faixa (baseline) e fama do artista (multiplicador)
@@ -158,7 +158,7 @@ export default async function cravadaRoutes(app: FastifyInstance) {
     const multiplier = computeMultiplier(artistFame, baselinePopularity)
 
     const { data: inserted, error: insertError } = await supabase
-      .from('cravadas')
+      .from('stakes')
       .insert([
         {
           user_id: userId,
@@ -184,69 +184,69 @@ export default async function cravadaRoutes(app: FastifyInstance) {
       .single()
 
     if (insertError || !inserted) {
-      app.log.error({ err: insertError, userId }, 'Erro ao inserir cravada')
-      return reply.code(500).send({ error: 'Erro ao salvar cravada' })
+      app.log.error({ err: insertError, userId }, 'Erro ao inserir stake')
+      return reply.code(500).send({ error: 'Erro ao salvar stake' })
     }
 
     // Snapshot inicial (dia 0): baseline, sem ganho
-    await supabase.from('cravada_snapshots').insert([
+    await supabase.from('stake_snapshots').insert([
       {
-        cravada_id: inserted.id,
+        stake_id: inserted.id,
         popularity: baselinePopularity,
         day_gain: 0,
         points_gain: 0,
       },
     ])
 
-    app.log.info({ userId, trackUri, multiplier }, 'Faixa cravada')
+    app.log.info({ userId, trackUri, multiplier }, 'Stake dado')
 
     return reply.code(201).send({
-      cravada: {
+      stake: {
         ...inserted,
         days_held: 0,
         days_to_collect: MIN_DAYS_TO_COLLECT,
         can_collect: false,
-        pessoas_cravaram: 1,
+        pessoas_deram_stake: 1,
       },
     })
   })
 
   // ---- Recolher (remover / coletar pontos) ----
   app.post<{ Params: { id: string } }>(
-    '/cravadas/:id/recolher',
+    '/stakes/:id/recolher',
     { preHandler: requireAuth },
     async (request, reply) => {
       const { id } = request.params
       const userId = request.user.id
       const supabase = supabaseForUser(request.accessToken)
 
-      const { data: cravada, error } = await supabase
-        .from('cravadas')
+      const { data: stake, error } = await supabase
+        .from('stakes')
         .select('*')
         .eq('id', id)
         .eq('user_id', userId)
         .maybeSingle()
 
       if (error) {
-        app.log.error({ err: error }, 'Erro ao buscar cravada para recolher')
+        app.log.error({ err: error }, 'Erro ao buscar stake para recolher')
         return reply.code(500).send({ error: 'Erro ao recolher' })
       }
-      if (!cravada) {
-        return reply.code(404).send({ error: 'Cravada não encontrada' })
+      if (!stake) {
+        return reply.code(404).send({ error: 'Stake não encontrado' })
       }
 
-      const held = daysHeld(cravada.craved_at)
-      const canCollect = cravada.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT
+      const held = daysHeld(stake.staked_at)
+      const canCollect = stake.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT
 
-      // Só coleta pontos se ficou >= 7 dias E ainda está ativa (não removida)
-      if (canCollect && cravada.accumulated_points > 0) {
-        const { error: ledgerError } = await supabase.from('cravada_collections').insert([
+      // Só coleta pontos se ficou >= 7 dias E ainda está ativo (não removido)
+      if (canCollect && stake.accumulated_points > 0) {
+        const { error: ledgerError } = await supabase.from('stake_collections').insert([
           {
             user_id: userId,
-            cravada_id: cravada.id,
-            track_title: cravada.track_title,
-            artist_name: cravada.artist_name,
-            points: cravada.accumulated_points,
+            stake_id: stake.id,
+            track_title: stake.track_title,
+            artist_name: stake.artist_name,
+            points: stake.accumulated_points,
           },
         ])
         if (ledgerError) {
@@ -255,18 +255,18 @@ export default async function cravadaRoutes(app: FastifyInstance) {
         }
       }
 
-      const collectedPoints = canCollect ? cravada.accumulated_points : 0
+      const collectedPoints = canCollect ? stake.accumulated_points : 0
 
       // A linha some da página (esvazia a vaga). Mantemos 'coletada' para histórico
       // quando houve coleta; senão, removemos de vez.
       if (collectedPoints > 0) {
         await supabase
-          .from('cravadas')
+          .from('stakes')
           .update({ status: 'coletada', collected_at: new Date().toISOString() })
-          .eq('id', cravada.id)
+          .eq('id', stake.id)
           .eq('user_id', userId)
       } else {
-        await supabase.from('cravadas').delete().eq('id', cravada.id).eq('user_id', userId)
+        await supabase.from('stakes').delete().eq('id', stake.id).eq('user_id', userId)
       }
 
       return reply.send({
@@ -277,11 +277,11 @@ export default async function cravadaRoutes(app: FastifyInstance) {
     }
   )
 
-  // ---- Total de pontos do usuário (sistema isolado de Cravadas) ----
-  app.get('/cravadas/points', { preHandler: requireAuth }, async (request, reply) => {
+  // ---- Total de pontos do usuário (sistema isolado de Stakes) ----
+  app.get('/stakes/points', { preHandler: requireAuth }, async (request, reply) => {
     const supabase = supabaseForUser(request.accessToken)
     const { data, error } = await supabase
-      .from('cravada_collections')
+      .from('stake_collections')
       .select('points')
       .eq('user_id', request.user.id)
 

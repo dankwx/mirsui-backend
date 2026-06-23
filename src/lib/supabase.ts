@@ -15,7 +15,7 @@ export const supabase = createClient(supabaseUrl, supabaseKey)
 /**
  * Cliente com a service role key: ignora o RLS. Use APENAS em jobs de
  * servidor que precisam ler/escrever dados de todos os usuários
- * (ex.: o snapshot diário das Cravadas). Nunca exponha em rotas públicas.
+ * (ex.: o snapshot diário dos Stakes). Nunca exponha em rotas públicas.
  */
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 export const supabaseAdmin = serviceRoleKey

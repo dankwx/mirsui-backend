@@ -1,13 +1,13 @@
-// src/jobs/cravadaSnapshot.ts
-// Job diário: mede a popularidade atual de cada cravada ativa no Spotify,
+// src/jobs/stakeSnapshot.ts
+// Job diário: mede a popularidade atual de cada stake ativo no Deezer,
 // registra um snapshot e acumula os pontos (ganho * multiplicador travado).
-// Roda com service role (lê cravadas de TODOS os usuários) — ver Cravada.md.
+// Roda com service role (lê stakes de TODOS os usuários) — ver Stake.md.
 
 import { supabaseAdmin } from '../lib/supabase'
 import { getTrackRank } from '../lib/deezer'
-import { computePointsGain, popScore } from '../lib/cravadaPoints'
+import { computePointsGain, popScore } from '../lib/stakePoints'
 
-interface CravadaRow {
+interface StakeRow {
   id: string
   deezer_track_id: string | null
   multiplier: number
@@ -15,7 +15,7 @@ interface CravadaRow {
   accumulated_points: number
 }
 
-export async function runCravadaSnapshot(logger?: {
+export async function runStakeSnapshot(logger?: {
   info: (o: unknown, m?: string) => void
   error: (o: unknown, m?: string) => void
 }): Promise<{ processed: number; removed: number; skipped: number }> {
@@ -25,17 +25,17 @@ export async function runCravadaSnapshot(logger?: {
   }
 
   if (!supabaseAdmin) {
-    log.error({}, 'SUPABASE_SERVICE_ROLE_KEY não configurada — job de cravadas abortado')
+    log.error({}, 'SUPABASE_SERVICE_ROLE_KEY não configurada — job de stakes abortado')
     return { processed: 0, removed: 0, skipped: 0 }
   }
 
-  const { data: cravadas, error } = await supabaseAdmin
-    .from('cravadas')
+  const { data: stakes, error } = await supabaseAdmin
+    .from('stakes')
     .select('id, deezer_track_id, multiplier, last_popularity, accumulated_points')
     .eq('status', 'ativa')
 
   if (error) {
-    log.error({ err: error }, 'Erro ao carregar cravadas ativas')
+    log.error({ err: error }, 'Erro ao carregar stakes ativos')
     return { processed: 0, removed: 0, skipped: 0 }
   }
 
@@ -45,12 +45,12 @@ export async function runCravadaSnapshot(logger?: {
 
   const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
 
-  for (const cravada of (cravadas ?? []) as CravadaRow[]) {
+  for (const stake of (stakes ?? []) as StakeRow[]) {
     // Idempotência: se já houve snapshot hoje, não conta de novo
     const { count: snapsToday } = await supabaseAdmin
-      .from('cravada_snapshots')
+      .from('stake_snapshots')
       .select('id', { count: 'exact', head: true })
-      .eq('cravada_id', cravada.id)
+      .eq('stake_id', stake.id)
       .gte('recorded_at', `${today}T00:00:00Z`)
 
     if ((snapsToday ?? 0) > 0) {
@@ -58,20 +58,20 @@ export async function runCravadaSnapshot(logger?: {
       continue
     }
 
-    // Sem id Deezer (não deveria acontecer em cravadas novas): pula
-    if (!cravada.deezer_track_id) {
+    // Sem id Deezer (não deveria acontecer em stakes novos): pula
+    if (!stake.deezer_track_id) {
       skipped++
       continue
     }
 
-    const rankRes = await getTrackRank(cravada.deezer_track_id)
+    const rankRes = await getTrackRank(stake.deezer_track_id)
 
     // Faixa saiu do Deezer → marca como removida (não vale mais), para de medir
     if (rankRes.notFound) {
       await supabaseAdmin
-        .from('cravadas')
+        .from('stakes')
         .update({ status: 'removida', last_checked_at: new Date().toISOString() })
-        .eq('id', cravada.id)
+        .eq('id', stake.id)
       removed++
       continue
     }
@@ -84,14 +84,14 @@ export async function runCravadaSnapshot(logger?: {
 
     const currentPop = popScore(rankRes.rank)
     const { dayGain, pointsGain } = computePointsGain(
-      cravada.last_popularity,
+      stake.last_popularity,
       currentPop,
-      Number(cravada.multiplier)
+      Number(stake.multiplier)
     )
 
-    await supabaseAdmin.from('cravada_snapshots').insert([
+    await supabaseAdmin.from('stake_snapshots').insert([
       {
-        cravada_id: cravada.id,
+        stake_id: stake.id,
         popularity: currentPop,
         day_gain: dayGain,
         points_gain: pointsGain,
@@ -99,18 +99,18 @@ export async function runCravadaSnapshot(logger?: {
     ])
 
     await supabaseAdmin
-      .from('cravadas')
+      .from('stakes')
       .update({
         last_popularity: currentPop,
         last_day_gain: pointsGain,
-        accumulated_points: cravada.accumulated_points + pointsGain,
+        accumulated_points: stake.accumulated_points + pointsGain,
         last_checked_at: new Date().toISOString(),
       })
-      .eq('id', cravada.id)
+      .eq('id', stake.id)
 
     processed++
   }
 
-  log.info({ processed, removed, skipped }, 'Snapshot de cravadas concluído')
+  log.info({ processed, removed, skipped }, 'Snapshot de stakes concluído')
   return { processed, removed, skipped }
 }

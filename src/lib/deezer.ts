@@ -1,5 +1,5 @@
 // src/lib/deezer.ts
-// Fonte da métrica das Cravadas (Deezer — API pública, sem chave).
+// Fonte da métrica dos Stakes (Deezer — API pública, sem chave).
 //   - track.rank   -> popularidade (sobe quando a faixa toca mais)
 //   - artist.nb_fan -> fama do artista (usada no multiplicador)
 // A faixa escolhida no Spotify é casada com o Deezer pelo ISRC (exato) e,

@@ -1,5 +1,5 @@
-// src/lib/cravadaPoints.ts
-// Regras de pontuação da feature Cravadas (ver Cravada.md).
+// src/lib/stakePoints.ts
+// Regras de pontuação da feature Stakes (ver Stake.md).
 //
 // A fonte da métrica é o Deezer (o Spotify deixou de expor popularity):
 //   - popularidade da faixa  <- Deezer track.rank  (normalizado p/ 0-100)
@@ -23,7 +23,7 @@ export function fameScore(nbFan: number): number {
 }
 
 /**
- * Multiplicador travado no momento da cravada.
+ * Multiplicador travado no momento do stake.
  * Quanto MENOS famoso (artista + faixa), MAIOR o multiplicador.
  *
  *   fama = 0,6 * fame_artista + 0,4 * pop_faixa   (cada um 0-100)
