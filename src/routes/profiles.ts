@@ -1,6 +1,6 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { supabase, supabaseForUser, supabaseAdmin, Profile } from '../lib/supabase'
-import { requireAuth } from '../plugins/auth'
+import { extractToken, getOptionalUser, requireAuth } from '../plugins/auth'
 
 const AVATAR_BUCKET = 'user-profile-images'
 
@@ -21,6 +21,50 @@ const PROFILE_COMMENT_SELECT =
 
 const MAX_PROFILE_TRACKS = 100
 const MAX_PROFILE_COMMENTS = 50
+
+// Forma estável de um usuário numa lista de seguidores/seguindo.
+interface FollowUser {
+  id: string
+  username: string | null
+  display_name: string | null
+  avatar_url: string | null
+  rating: number | null
+  isFollowing: boolean
+}
+
+// Normaliza uma linha vinda das RPCs get_user_followers/get_user_following.
+function mapFollowUser(row: any, followingSet: Set<string>): FollowUser {
+  return {
+    id: row.id,
+    username: row.username ?? null,
+    display_name: row.display_name ?? null,
+    avatar_url: row.avatar_url ?? null,
+    rating: row.rating ?? null,
+    isFollowing: followingSet.has(row.id),
+  }
+}
+
+// Dado o token (opcional) de quem está vendo a lista, descobre quais dos `ids`
+// esse usuário já segue — para o botão "Seguir / Deixar de seguir" aparecer no
+// estado certo. Sem token (ou deslogado), ninguém é marcado como seguido.
+async function viewerFollowingSet(
+  request: FastifyRequest,
+  ids: string[]
+): Promise<Set<string>> {
+  const token = extractToken(request)
+  if (!token || ids.length === 0) return new Set()
+
+  const viewer = await getOptionalUser(request)
+  if (!viewer) return new Set()
+
+  const { data } = await supabaseForUser(token)
+    .from('followers')
+    .select('following_id')
+    .eq('follower_id', viewer.id)
+    .in('following_id', ids)
+
+  return new Set((data ?? []).map((r) => r.following_id as string))
+}
 
 export default async function profileRoutes(app: FastifyInstance) {
   // Listar todos os profiles
@@ -145,6 +189,106 @@ export default async function profileRoutes(app: FastifyInstance) {
       following: Array.isArray(following.data) ? following.data.length : 0,
     })
   })
+
+  // Lista de seguidores do perfil. Auth opcional: com token, cada usuário vem
+  // marcado com isFollowing (relativo a quem está vendo), para o botão de
+  // seguir/deixar de seguir aparecer no estado certo.
+  app.get<{ Params: { id: string } }>(
+    '/profiles/:id/followers',
+    async (request, reply) => {
+      const { id } = request.params
+      const { data, error } = await supabase.rpc('get_user_followers', {
+        user_uuid: id,
+      })
+
+      if (error) {
+        app.log.error({ err: error, profileId: id }, 'Erro ao buscar seguidores')
+        return reply.code(500).send({ error: 'Erro ao buscar seguidores' })
+      }
+
+      const rows = Array.isArray(data) ? data : []
+      const followingSet = await viewerFollowingSet(
+        request,
+        rows.map((r: any) => r.id)
+      )
+      return reply.send({ users: rows.map((r: any) => mapFollowUser(r, followingSet)) })
+    }
+  )
+
+  // Lista de quem o perfil está seguindo (mesma lógica do isFollowing).
+  app.get<{ Params: { id: string } }>(
+    '/profiles/:id/following',
+    async (request, reply) => {
+      const { id } = request.params
+      const { data, error } = await supabase.rpc('get_user_following', {
+        user_uuid: id,
+      })
+
+      if (error) {
+        app.log.error({ err: error, profileId: id }, 'Erro ao buscar seguindo')
+        return reply.code(500).send({ error: 'Erro ao buscar seguindo' })
+      }
+
+      const rows = Array.isArray(data) ? data : []
+      const followingSet = await viewerFollowingSet(
+        request,
+        rows.map((r: any) => r.id)
+      )
+      return reply.send({ users: rows.map((r: any) => mapFollowUser(r, followingSet)) })
+    }
+  )
+
+  // Seguir um perfil. Idempotente: seguir de novo não duplica a linha.
+  app.post<{ Params: { id: string } }>(
+    '/profiles/:id/follow',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params
+      const followerId = request.user.id
+
+      if (followerId === id) {
+        return reply.code(400).send({ error: 'Você não pode seguir a si mesmo' })
+      }
+
+      const { error } = await supabaseForUser(request.accessToken)
+        .from('followers')
+        .insert({ follower_id: followerId, following_id: id })
+
+      // 23505 = violação de unique (já seguia) → tratamos como sucesso.
+      if (error && error.code !== '23505') {
+        app.log.error({ err: error, followerId, following: id }, 'Erro ao seguir')
+        return reply.code(500).send({ error: 'Erro ao seguir' })
+      }
+
+      return reply.send({ success: true, isFollowing: true })
+    }
+  )
+
+  // Deixar de seguir um perfil.
+  app.delete<{ Params: { id: string } }>(
+    '/profiles/:id/follow',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params
+      const followerId = request.user.id
+
+      const { error } = await supabaseForUser(request.accessToken)
+        .from('followers')
+        .delete()
+        .eq('follower_id', followerId)
+        .eq('following_id', id)
+
+      if (error) {
+        app.log.error(
+          { err: error, followerId, following: id },
+          'Erro ao deixar de seguir'
+        )
+        return reply.code(500).send({ error: 'Erro ao deixar de seguir' })
+      }
+
+      return reply.send({ success: true, isFollowing: false })
+    }
+  )
 
   // Upload da foto de perfil (apenas o próprio usuário).
   // Recebe a imagem em base64 e envia para o Storage; devolve a URL pública.
