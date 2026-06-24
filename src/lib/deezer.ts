@@ -10,6 +10,8 @@ interface DeezerJson {
   rank?: number
   nb_fan?: number
   artist?: { id?: number; name?: string }
+  album?: { id?: number }
+  genres?: { data?: { name?: string }[] }
   error?: { code?: number; message?: string }
   data?: DeezerJson[]
 }
@@ -68,6 +70,25 @@ export async function resolveTrack(opts: {
     rank: Number(track.rank) || 0,
     nbFan,
   }
+}
+
+/**
+ * Gêneros do álbum da faixa identificada pelo ISRC, ou null. O Spotify deixa
+ * `genres` vazio para a maioria dos artistas BR/indie, então a página de track
+ * usa isto como fallback. Ex.: ["Rap/Hip Hop"].
+ */
+export async function fetchDeezerGenresByISRC(isrc: string): Promise<string[] | null> {
+  if (!isrc) return null
+
+  const track = await dz('/track/isrc:' + encodeURIComponent(isrc))
+  const albumId = track?.album?.id
+  if (!track || track.error || !albumId) return null
+
+  const album = await dz('/album/' + albumId)
+  const names = album?.genres?.data
+    ?.map((g) => g.name)
+    .filter((n): n is string => !!n)
+  return names && names.length > 0 ? names : null
 }
 
 /**

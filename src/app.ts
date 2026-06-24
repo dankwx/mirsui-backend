@@ -8,10 +8,13 @@ import authRoutes from './routes/auth'
 import profileRoutes from './routes/profiles'
 import feedRoutes from './routes/feed'
 import claimRoutes from './routes/claims'
+import trackRoutes from './routes/tracks'
 import stakeRoutes from './routes/stakes'
 
 export async function buildApp() {
   const app = Fastify({ logger: true })
+
+  const isDev = process.env.NODE_ENV !== 'production'
 
   const allowedOrigins = new Set([
     'http://localhost:3000',
@@ -23,8 +26,20 @@ export async function buildApp() {
     allowedOrigins.add(process.env.FRONTEND_URL)
   }
 
+  // Em dev, o Expo web é servido em localhost/IP-da-LAN numa porta variável
+  // (8081 no Metro, 19006 no webpack antigo). Liberamos qualquer origem local
+  // para não precisar manter portas/IPs na allowlist. Em produção vale só a lista acima.
+  const devOriginPattern =
+    /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/
+
   await app.register(cors, {
-    origin: Array.from(allowedOrigins),
+    origin(origin, cb) {
+      // Sem header Origin (app nativo, curl, server-to-server) → libera.
+      if (!origin) return cb(null, true)
+      if (allowedOrigins.has(origin)) return cb(null, true)
+      if (isDev && devOriginPattern.test(origin)) return cb(null, true)
+      cb(null, false)
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
   })
@@ -53,6 +68,7 @@ export async function buildApp() {
   await app.register(profileRoutes)
   await app.register(feedRoutes)
   await app.register(claimRoutes)
+  await app.register(trackRoutes)
   await app.register(stakeRoutes)
 
   return app
