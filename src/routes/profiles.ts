@@ -82,7 +82,9 @@ export default async function profileRoutes(app: FastifyInstance) {
     return reply.send({ profiles: data, count: data?.length || 0 })
   })
 
-  // Buscar profile por ID
+  // Buscar profile por ID. Auth opcional: com token, devolve também isFollowing
+  // (se quem está vendo já segue este perfil) — uma checagem de 1 linha, pra a
+  // tela de visita já renderizar o botão no estado certo, sem flicker.
   app.get<{ Params: { id: string } }>('/profiles/:id', async (request, reply) => {
     const { id } = request.params
 
@@ -97,7 +99,22 @@ export default async function profileRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'Profile não encontrado' })
     }
 
-    return reply.send({ profile: data })
+    let isFollowing = false
+    const token = extractToken(request)
+    if (token) {
+      const viewer = await getOptionalUser(request)
+      if (viewer && viewer.id !== id) {
+        const { data: rel } = await supabaseForUser(token)
+          .from('followers')
+          .select('follower_id')
+          .eq('follower_id', viewer.id)
+          .eq('following_id', id)
+          .maybeSingle()
+        isFollowing = !!rel
+      }
+    }
+
+    return reply.send({ profile: data, isFollowing })
   })
 
   // Buscar profile por username
