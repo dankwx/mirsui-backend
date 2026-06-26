@@ -69,6 +69,31 @@ export default async function stakeRoutes(app: FastifyInstance) {
       }
     }
 
+    // Série diária de cada stake (pro gráfico) — uma query só, agrupada por
+    // stake_id. Vem junto pra UI abrir o gráfico instantâneo, sem novo fetch.
+    const ids = list.map((c) => c.id)
+    const snapsByStake = new Map<
+      string,
+      { date: string; popularity: number; dayGain: number; pointsGain: number }[]
+    >()
+    if (ids.length > 0) {
+      const { data: snaps } = await supabase
+        .from('stake_snapshots')
+        .select('stake_id, recorded_at, popularity, day_gain, points_gain')
+        .in('stake_id', ids)
+        .order('recorded_at', { ascending: true })
+      for (const s of snaps ?? []) {
+        const arr = snapsByStake.get(s.stake_id) ?? []
+        arr.push({
+          date: s.recorded_at,
+          popularity: s.popularity,
+          dayGain: s.day_gain,
+          pointsGain: s.points_gain,
+        })
+        snapsByStake.set(s.stake_id, arr)
+      }
+    }
+
     const result = list.map((c) => {
       const held = daysHeld(c.staked_at)
       return {
@@ -77,6 +102,7 @@ export default async function stakeRoutes(app: FastifyInstance) {
         days_to_collect: Math.max(0, MIN_DAYS_TO_COLLECT - held),
         can_collect: c.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT,
         pessoas_deram_stake: countByUri.get(c.track_uri) ?? 1,
+        snapshots: snapsByStake.get(c.id) ?? [],
       }
     })
 
