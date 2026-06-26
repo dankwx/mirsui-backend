@@ -83,6 +83,56 @@ export default async function stakeRoutes(app: FastifyInstance) {
     return reply.send({ stakes: result, maxSlots: MAX_SLOTS })
   })
 
+  // ---- Série diária de um stake (pro gráfico de evolução) ----
+  app.get<{ Params: { id: string } }>(
+    '/stakes/:id/snapshots',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params
+      const supabase = supabaseForUser(request.accessToken)
+
+      // Confere que o stake é do usuário (a RLS também protege, mas isto dá 404 limpo)
+      const { data: stake, error: stakeErr } = await supabase
+        .from('stakes')
+        .select('id, baseline_popularity, last_popularity, multiplier, staked_at')
+        .eq('id', id)
+        .eq('user_id', request.user.id)
+        .maybeSingle()
+
+      if (stakeErr) {
+        app.log.error({ err: stakeErr }, 'Erro ao buscar stake para snapshots')
+        return reply.code(500).send({ error: 'Erro ao buscar histórico' })
+      }
+      if (!stake) {
+        return reply.code(404).send({ error: 'Stake não encontrado' })
+      }
+
+      const { data: snaps, error } = await supabase
+        .from('stake_snapshots')
+        .select('recorded_at, popularity, day_gain, points_gain')
+        .eq('stake_id', id)
+        .order('recorded_at', { ascending: true })
+
+      if (error) {
+        app.log.error({ err: error }, 'Erro ao buscar snapshots')
+        return reply.code(500).send({ error: 'Erro ao buscar histórico' })
+      }
+
+      return reply.send({
+        baseline_popularity: stake.baseline_popularity,
+        last_popularity: stake.last_popularity,
+        multiplier: stake.multiplier,
+        staked_at: stake.staked_at,
+        snapshots: (snaps ?? []).map((s) => ({
+          date: s.recorded_at,
+          popularity: s.popularity,
+          dayGain: s.day_gain,
+          pointsGain: s.points_gain,
+        })),
+      })
+    }
+  )
+
   // ---- Dar stake numa faixa ----
   app.post<{
     Body: {
