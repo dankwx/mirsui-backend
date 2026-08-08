@@ -3,6 +3,7 @@ import type { User } from '@supabase/supabase-js'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 
+import { identityKey } from './lib/rateLimitKeys'
 import healthRoutes from './routes/health'
 import authRoutes from './routes/auth'
 import profileRoutes from './routes/profiles'
@@ -44,9 +45,13 @@ export async function buildApp() {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
   })
 
+  // 100 req / 15 min por USUÁRIO, não por IP. Antes era por IP, e como todo o
+  // tráfego chega pelo servidor Next, os 100 eram divididos pela base inteira
+  // (~6,7 req/min pro app todo). Ver src/lib/rateLimitKeys.ts.
   await app.register(rateLimit, {
     max: 100,
-    timeWindow: '15 minutes'
+    timeWindow: '15 minutes',
+    keyGenerator: identityKey
   })
 
   // request.user e request.accessToken são populados pelo preHandler requireAuth (src/plugins/auth.ts)

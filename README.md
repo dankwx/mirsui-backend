@@ -63,13 +63,37 @@ src/
 
 ### Rate limiting
 
-Global: **100 requisições / 15 minutos** por IP. Limites mais restritos por rota:
+Global: **100 requisições / 15 minutos por usuário**. Limites mais restritos por rota:
 
-| Rota | Limite |
-|---|---|
-| `POST /auth/signup` | 5 / hora |
-| `POST /auth/login` | 5 / minuto |
-| `POST /auth/reset-password` | 3 / hora |
+| Rota | Limite | Chave |
+|---|---|---|
+| (global) | 100 / 15 min | `user:<sub do JWT>`, ou o IP se anônimo |
+| `POST /auth/signup` | 5 / hora | email do corpo |
+| `POST /auth/login` | 5 / minuto | email do corpo |
+| `POST /auth/reset-password` | 3 / hora | email do corpo |
+
+**Não é por IP, de propósito.** O frontend Next chama este backend sempre do
+servidor (server components e route handlers), nunca do browser. Então
+`request.ip` é sempre o mesmo endereço e um limite por IP colocaria a base
+inteira num balde só — os 100/15min valeriam pro app todo, ~6,7 req/min. As
+chaves ficam em `src/lib/rateLimitKeys.ts`:
+
+- `identityKey` (global): lê o `sub` do JWT do Supabase **sem verificar a
+  assinatura**, porque a verificação de verdade é o `requireAuth` e aqui o valor
+  só separa baldes. Usa o `sub` em vez do hash do token cru porque o access
+  token rotaciona a cada ~1h e senão o balde zeraria a cada refresh. Cai no IP
+  quando não há token.
+- `emailKey` (rotas de auth): essas rotas não têm header `Authorization`, então
+  a chave é o email do corpo, normalizado e hasheado. Exige
+  `hook: 'preValidation'` na config da rota, porque o hook padrão do plugin é
+  `onRequest`, que roda antes do parsing e não vê `request.body`.
+
+**Limitação conhecida:** leitura anônima (rotas com `getOptionalUser` — feed,
+tracks e profiles públicos) continua num balde compartilhado, porque sem token
+não há identidade pra chavear. Fechar isso exige o frontend repassar o IP real
+do visitante num header e o Fastify subir com `trustProxy`. `POST /auth/refresh`
+também cai no IP: só tem `refresh_token` no corpo, e o limite global roda em
+`onRequest`, antes do parsing.
 
 ### CORS
 

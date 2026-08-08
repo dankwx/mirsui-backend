@@ -1,6 +1,14 @@
 import type { FastifyInstance } from 'fastify'
 import { supabase } from '../lib/supabase'
 import { extractToken, getOptionalUser } from '../plugins/auth'
+import { emailKey } from '../lib/rateLimitKeys'
+
+// Sem header Authorization, a chave padrão (identityKey) cairia no IP — que é
+// sempre o do servidor Next. Chaveando por email, o limite volta a valer por
+// conta em vez de trancar todo mundo junto. `hook: 'preValidation'` é
+// obrigatório: o hook padrão do plugin roda antes do parsing do corpo.
+// Ver src/lib/rateLimitKeys.ts.
+const perEmail = { hook: 'preValidation' as const, keyGenerator: emailKey }
 
 const DEFAULT_AVATAR_URL =
   'https://tqprioqqitimssshcrcr.supabase.co/storage/v1/object/public/user-profile-images/default.jpg'
@@ -28,7 +36,7 @@ export default async function authRoutes(app: FastifyInstance) {
     Body: { email: string; password: string; username: string }
   }>('/auth/signup', {
     config: {
-      rateLimit: { max: 5, timeWindow: '1 hour' }
+      rateLimit: { max: 5, timeWindow: '1 hour', ...perEmail }
     }
   }, async (request, reply) => {
     const { email, password, username } = request.body ?? {}
@@ -99,7 +107,7 @@ export default async function authRoutes(app: FastifyInstance) {
     Body: { email: string; password: string }
   }>('/auth/login', {
     config: {
-      rateLimit: { max: 5, timeWindow: '1 minute' }
+      rateLimit: { max: 5, timeWindow: '1 minute', ...perEmail }
     }
   }, async (request, reply) => {
     const { email, password } = request.body ?? {}
@@ -129,7 +137,7 @@ export default async function authRoutes(app: FastifyInstance) {
     Body: { email: string; redirectUrl?: string }
   }>('/auth/reset-password', {
     config: {
-      rateLimit: { max: 3, timeWindow: '1 hour' }
+      rateLimit: { max: 3, timeWindow: '1 hour', ...perEmail }
     }
   }, async (request, reply) => {
     const { email, redirectUrl } = request.body ?? {}
