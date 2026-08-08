@@ -21,21 +21,19 @@
 -- que só existe depois deste arquivo.
 
 -- ------------------------------------------------------------
--- 1. Índice para as contagens por faixa
+-- 1. Índices: nada a fazer
 -- ------------------------------------------------------------
--- Nenhum índice cobria `track_uri` (ver 005: o que existe é
--- unique_user_track_url, sobre track_URL). As três queries que precisam dele:
+-- As queries novas são `where track_uri = X` (contagem de salvamentos) e
+-- `where user_id = M and track_uri in (...)` ("quais destas eu salvei").
 --
---   where track_uri = X                        -> contagem de salvamentos
---   where user_id = M and track_uri in (...)   -> "quais destas eu salvei"
---   tracks/claim: as duas acima, uma por salvamento
+-- A primeira versão deste arquivo criava (track_uri, user_id) para as duas.
+-- Conferindo o banco antes de aplicar: `idx_tracks_track_uri` (track_uri) já
+-- existe — não estava listado na auditoria do 005, que só olhou os índices
+-- relevantes para as queries de então. Ele cobre a primeira forma, e
+-- `unique_user_track_url` lidera com user_id, cobrindo a segunda.
 --
--- Um índice só resolve as duas formas: (track_uri, user_id) lidera com
--- track_uri para a contagem, e ainda permite index-only scan no par com
--- user_id. É o mesmo raciocínio que o 005 aplicou a unique_track_like.
-create index if not exists idx_tracks_track_uri_user
-  on public.tracks (track_uri, user_id)
-  where track_uri is not null;
+-- Ou seja: o índice novo seria redundante e só cobraria escrita — exatamente o
+-- caso que o 005 desfez. Por isso este arquivo não cria índice nenhum.
 
 -- ------------------------------------------------------------
 -- 2. Contadores do feed, agora sem like
@@ -87,12 +85,12 @@ drop function if exists public.get_track_interaction_counts(integer[]);
 -- 3. A tabela track_likes
 -- ------------------------------------------------------------
 -- Depois deste migration nenhum código do backend ou do front lê ou escreve em
--- track_likes. A tabela fica órfã, mas NÃO é derrubada aqui: drop de tabela com
--- dados não tem volta, e o custo de deixá-la parada é zero.
+-- track_likes. A tabela fica órfã aqui de propósito, para o deploy do código
+-- não depender de um drop.
 --
--- Para remover de vez, rode à mão quando tiver certeza (e de preferência depois
--- de um backup):
+-- Ela foi removida no 008_remove_like.sql, junto com duas funções órfãs que
+-- também dependiam dela.
 --
---   drop table if exists public.track_likes;
---
--- Os índices idx_track_likes_track_id e unique_track_like saem junto com ela.
+-- APLICADO em 08/08/2026 no projeto soundsage. Ver também
+-- 007_backfill_track_uri.sql: metade das linhas de tracks não tinha track_uri,
+-- que é a chave de tudo que este arquivo introduz.
