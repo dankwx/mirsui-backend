@@ -160,29 +160,26 @@ No PATCH, apenas estes campos são aceitos (os demais são ignorados): `username
 
 ### Feed (`/feed`)
 
-#### `GET /feed?limit=5&offset=0`
-Posts do feed (tracks reivindicadas, mais recentes primeiro) com dados do autor e contadores.
+#### `GET /feed?limit=5&offset=0` (auth opcional)
+Posts do feed (tracks salvas, mais recentes primeiro) com dados do autor e contadores.
 
 `limit`: 1–50 (padrão 5) · `offset`: ≥ 0 (padrão 0)
 
-Resposta: `200 { posts: [...], total }` — cada post inclui os dados da track, `username`, `display_name`, `avatar_url`, `likes_count` e `comments_count`.
+Resposta: `200 { posts: [...], total }` — cada post inclui os dados da track, `username`, `display_name`, `avatar_url`, `savers_count`, `comments_count` e `saved_by_me`.
+
+`savers_count` conta quantas pessoas salvaram **a música** (agrupando por `track_uri`), não quantas salvaram aquela linha: cada pessoa que salva a mesma faixa cria uma linha própria em `tracks`. É o mesmo universo de `position`, então "3ª a salvar · 12 já salvaram" fecha.
+
+`saved_by_me` responde "o usuário do token já salvou esta música?", também por `track_uri`. Com token ausente ou inválido vem `false` em todos os posts — então o cliente precisa mandar o header também nas páginas seguintes do `offset`, senão as faixas já salvas voltam a aparecer como não salvas.
 
 #### `GET /feed/recent-claims?limit=4`
-Reivindicações recentes sem músicas duplicadas (únicas por `track_uri`). `limit`: 1–20 (padrão 4).
+Achados recentes sem músicas duplicadas (únicos por `track_uri`). `limit`: 1–20 (padrão 4).
 
 Resposta: `200 { claims: [...] }`
 
-#### `POST /feed/user-likes` (auth opcional)
-Body: `{ "track_ids": number[] }`
-
-Retorna quais dessas tracks o usuário logado curtiu: `200 { liked_tracks: number[] }`. Sem token (ou token inválido), retorna lista vazia.
-
-### Tracks — likes e comentários
+### Tracks — comentários
 
 | Método | Rota | Auth | Descrição |
 |---|---|---|---|
-| POST | `/tracks/:id/like` | 🔒 | Dá like. `200 { success: true }` |
-| DELETE | `/tracks/:id/like` | 🔒 | Remove like. `200 { success: true, deleted }` · `404` se não havia like |
 | GET | `/tracks/:id/comments` | — | Lista comentários (mais recentes primeiro). `200 { comments }` |
 | POST | `/tracks/:id/comments` | 🔒 | Cria comentário. Body: `{ "comment": string }`. `200 { comment }` |
 | DELETE | `/comments/:commentId` | 🔒 autor | Deleta o próprio comentário. `200 { success: true }` · `403` se não for o autor · `404` |
@@ -225,10 +222,12 @@ Pontos do usuário logado (via RPC `get_user_points` no Supabase): `200 { points
 
 ## Dependências do banco (Supabase)
 
-A API espera as tabelas `profiles`, `tracks`, `track_likes`, `track_comments`, além de:
+A API espera as tabelas `profiles`, `tracks`, `track_comments`, `favorites`, além de:
 
 - **Trigger de criação de profile** ao registrar usuário no Auth (usa `username`, `display_name` e `avatar_url` do `user_metadata`).
 - **RPC `get_user_points(user_uuid uuid)`** para `GET /user/points`.
+- **RPC `get_track_save_counts(p_track_ids integer[])`** para os contadores do feed e do perfil (ver `migrations/006_salvar_de_verdade.sql`).
+- **RPC `get_trending_tracks(p_limit integer)`** para as faixas em alta da landing.
 - A coluna `profiles.email` preenchida pelo trigger — usada na checagem de email duplicado no signup.
 
 🔒 = exige header `Authorization: Bearer <access_token>` (access token da sessão Supabase). Sem token: `401 { "error": "Token não fornecido" }` · token inválido: `401 { "error": "Usuário não autenticado" }`.

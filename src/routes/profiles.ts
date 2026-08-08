@@ -163,21 +163,28 @@ export default async function profileRoutes(app: FastifyInstance) {
 
     const trackIds = tracks.map((track) => track.id)
 
-    // Quantas pessoas também salvaram cada faixa + favoritas do dono do perfil
-    const [likesRes, favsRes] = await Promise.all([
-      supabase.from('track_likes').select('track_id').in('track_id', trackIds),
+    // Quantas pessoas também salvaram cada faixa + favoritas do dono do perfil.
+    // O comentário aqui já dizia "salvaram", mas a query contava track_likes —
+    // outra ação. Agora conta salvamento mesmo, por track_uri (ver
+    // migrations/006_salvar_de_verdade.sql).
+    const [contagensRes, favsRes] = await Promise.all([
+      supabase.rpc('get_track_save_counts', { p_track_ids: trackIds }),
       supabase.from('favorites').select('track_id').eq('user_id', id).in('track_id', trackIds),
     ])
 
-    const likesByTrack: Record<number, number> = {}
-    for (const row of likesRes.data || []) {
-      likesByTrack[row.track_id] = (likesByTrack[row.track_id] || 0) + 1
+    if (contagensRes.error) {
+      app.log.error({ err: contagensRes.error, profileId: id }, 'Erro ao contar salvamentos')
+    }
+
+    const saversByTrack: Record<number, number> = {}
+    for (const row of contagensRes.data || []) {
+      saversByTrack[row.track_id] = Number(row.savers_count) || 0
     }
     const favoritedIds = new Set((favsRes.data || []).map((row) => row.track_id))
 
     const result = tracks.map((track) => ({
       ...track,
-      likes_count: likesByTrack[track.id] || 0,
+      savers_count: saversByTrack[track.id] || 0,
       is_favorited: favoritedIds.has(track.id),
     }))
 
