@@ -1,0 +1,49 @@
+-- 005_indices.sql
+-- Auditoria de índices das tabelas quentes + desfaz um índice redundante.
+--
+-- CONTEXTO
+-- Nenhum `create index` está versionado neste repositório, mas o migration 003
+-- renomeia índices que nenhum arquivo daqui criou — havia índice feito pelo
+-- painel do Supabase. A primeira versão deste arquivo tentava criar cinco
+-- índices para as queries do feed e da landing.
+--
+-- RESULTADO DA AUDITORIA (rodada em soundsage, agosto/2026)
+-- Quatro dos cinco já existiam, e a cobertura estava correta:
+--
+--   tracks         idx_tracks_claimedat        (claimedat) where claimedat is not null
+--                    -> ordenação do feed e dos achados recentes. É ASC, e o
+--                       feed pede DESC: btree varre para trás, serve igual.
+--   tracks         unique_user_track_url       (user_id, track_url)
+--                    -> lidera com user_id, então cobre "faixas deste usuário".
+--   track_likes    idx_track_likes_track_id    (track_id)
+--   track_comments idx_track_comments_track_id (track_id)
+--                    -> contagem por faixa (RPC get_track_interaction_counts).
+--   track_likes    unique_track_like           (track_id, user_id)
+--                    -> "quais destas faixas eu curti" (/feed/user-likes).
+--
+-- Ou seja: as queries quentes já estavam indexadas. O gargalo da landing era o
+-- número de idas ao banco, não a falta de índice — e isso o 004 resolveu.
+--
+-- O QUE ESTE ARQUIVO FAZ
+-- O quinto candidato, (user_id, track_id) em track_likes, foi criado por engano.
+-- A verificação comparava a ordem exata das colunas iniciais e não percebeu que
+-- unique_track_like já tem as mesmas duas colunas, invertidas. Para
+-- `where user_id = X and track_id in (...)` os dois permitem index-only scan —
+-- o novo não acrescenta nada e custa escrita em todo like dado ou desfeito.
+--
+-- Índice duplicado não dá erro; só cobra caro e calado. Por isso sai.
+
+drop index if exists public.track_likes_user_track_idx;
+
+-- Conferir o estado final:
+--
+--   select tablename, indexname, indexdef
+--   from pg_indexes
+--   where schemaname = 'public'
+--     and tablename in ('tracks', 'track_likes', 'track_comments')
+--   order by tablename, indexname;
+--
+-- Nota para quem for criar um ambiente novo: os índices listados acima NÃO são
+-- criados por nenhum migration deste repositório — vieram do painel, junto com
+-- as próprias tabelas, que também não estão versionadas aqui. Um banco criado
+-- do zero só com estes arquivos não terá nem as tabelas nem os índices.

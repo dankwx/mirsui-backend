@@ -4,13 +4,10 @@ import { getOptionalUser } from '../plugins/auth'
 
 const MAX_FEED_LIMIT = 50
 
-// Conta ocorrências de track_id em uma lista de linhas
-function countByTrackId(rows: Array<{ track_id: number }> | null): Record<number, number> {
-  const counts: Record<number, number> = {}
-  for (const row of rows || []) {
-    counts[row.track_id] = (counts[row.track_id] || 0) + 1
-  }
-  return counts
+interface ContadoresDaFaixa {
+  track_id: number
+  likes_count: number
+  comments_count: number
 }
 
 export default async function feedRoutes(app: FastifyInstance) {
@@ -59,13 +56,27 @@ export default async function feedRoutes(app: FastifyInstance) {
 
     const trackIds = tracks.map((track) => track.id)
 
-    const [likesResult, commentsResult] = await Promise.all([
-      supabase.from('track_likes').select('track_id').in('track_id', trackIds),
-      supabase.from('track_comments').select('track_id').in('track_id', trackIds)
-    ])
+    // A contagem acontece no banco. Antes isto puxava TODAS as linhas de
+    // track_likes/track_comments das faixas e contava no JS — o PostgREST corta
+    // a resposta em 1000 linhas, então a partir de mil likes a faixa passava a
+    // mostrar número errado, sem erro nenhum.
+    // Ver mirsui-backend/migrations/004_rpcs_de_contagem.sql.
+    const { data: contadores, error: contadoresError } = await supabase.rpc(
+      'get_track_interaction_counts',
+      { p_track_ids: trackIds }
+    )
 
-    const likesCountByTrack = countByTrackId(likesResult.data)
-    const commentsCountByTrack = countByTrackId(commentsResult.data)
+    // Contador é acessório: se falhar, o feed ainda vale mais que um 500.
+    if (contadoresError) {
+      app.log.error({ err: contadoresError }, 'Erro ao contar likes e comentários')
+    }
+
+    const likesCountByTrack: Record<number, number> = {}
+    const commentsCountByTrack: Record<number, number> = {}
+    for (const linha of (contadores || []) as ContadoresDaFaixa[]) {
+      likesCountByTrack[linha.track_id] = Number(linha.likes_count) || 0
+      commentsCountByTrack[linha.track_id] = Number(linha.comments_count) || 0
+    }
 
     const posts = tracks.map((track: any) => ({
       id: track.id,
