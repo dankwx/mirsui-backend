@@ -1,0 +1,54 @@
+-- 006_remove_user_actions.sql
+-- Apaga a trilha de auditoria user_actions e desliga um cron job órfão.
+--
+-- Duas limpezas independentes que caíram no mesmo dia. Ambas já foram aplicadas
+-- em soundsage (agosto/2026); este arquivo existe para o registro e para quem
+-- for montar o banco do zero.
+--
+-- ------------------------------------------------------------
+-- 1. user_actions
+-- ------------------------------------------------------------
+-- Era uma trilha de auditoria: quem salvou o quê e quando. A ideia de produto
+-- por trás dela foi abandonada, e nenhuma linha de código deste repositório ou
+-- do frontend jamais leu a tabela — só o trigger abaixo escrevia nela.
+--
+-- Estado no momento da remoção: 83 linhas, da primeira em dezembro/2024 até a
+-- última em 12/06/2026. Dessas, 80 do tipo `tracks_insert` e 3 de reivindicação
+-- de artista/canal (`userartistclaims_insert`, `userchannelclaims_insert`) —
+-- tipos que vinham de tabelas que já não existem mais.
+--
+-- Não confundir com analytics: a instrumentação de produto do Mirsui é PostHog,
+-- que é SaaS externo (lib/posthog.ts no frontend) e não escreve no Postgres.
+-- Apagar user_actions não deixa buraco nenhum em métrica.
+--
+-- A ORDEM IMPORTA
+-- O trigger depende da função, e a função escreve na tabela. Derrubar a tabela
+-- primeiro deixaria log_tracks_insert apontando para o vazio e QUEBRARIA TODO
+-- SALVAMENTO DE MÚSICA — o insert em tracks falharia junto com o trigger.
+-- Por isso: trigger, depois função, depois tabela.
+--
+-- Os outros três triggers de tracks (track_popularity_trigger,
+-- update_user_rating_on_delete, update_user_rating_on_discover) não têm relação
+-- com este e seguem intactos.
+
+drop trigger if exists log_tracks_insert on public.tracks;
+drop function if exists public.log_user_action();
+drop table if exists public.user_actions;
+
+-- ------------------------------------------------------------
+-- 2. Cron job órfão
+-- ------------------------------------------------------------
+-- O jobid 1 rodava `SELECT public.process_expired_predictions_v2()` todo dia às
+-- 00:05 UTC. A função foi apagada pelo migration
+-- 20260620210321_remove_user_prediction_feature_completely (junho/2026), mas o
+-- agendamento ficou — então o job falhava com "function does not exist" todo
+-- dia, sem consequência além de sujar o log do Postgres.
+--
+-- Não versionado como SQL executável porque cron.unschedule(jobid) erra se o
+-- job não existir, e o id é atribuído pelo servidor. Em soundsage foi:
+--
+--   select cron.unschedule(1);
+--
+-- Para conferir que não sobrou nada agendado:
+--
+--   select jobid, schedule, command, active from cron.job;
