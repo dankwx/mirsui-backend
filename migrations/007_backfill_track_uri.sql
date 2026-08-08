@@ -57,13 +57,16 @@ where t.id = r.id
 -- 0 linhas sem track_uri · 0 posições inconsistentes · 22 -> 35 músicas únicas
 -- reconhecidas · 9 músicas passaram a ter 2+ salvamentos.
 --
--- PENDÊNCIA CONHECIDA
+-- DUPLICATA CONHECIDA, DEIXADA DE PROPÓSITO
 -- O backfill expôs 1 duplicata real: o mesmo usuário salvou "Instant Crush"
 -- (spotify:track:2cGxRwrMyEAp8dEbuZaVv6) duas vezes — ids 38 (mai/2025) e 107
 -- (out/2025). Passou porque o check de duplicata em tracks/claim compara
--- track_uri, que era null na linha antiga. Não foi removida: é dado de
--- usuário e a decisão não é do migration. Para juntar, apagar a linha 38 e
--- rodar de novo o passo 2.
+-- track_uri, que era null na linha antiga.
+--
+-- Daniel decidiu ignorar em 08/08/2026. Não é bug aberto: tracks/claim já
+-- impede o caso novo, agora que toda linha tem track_uri. Só esta linha antiga
+-- carrega a inconsistência. Se um dia incomodar, apagar a linha 38 e rodar de
+-- novo o passo 2 deste arquivo.
 --
 -- O backup pode ser descartado quando não fizer mais falta:
 --   drop table backup.tracks_antes_007;
