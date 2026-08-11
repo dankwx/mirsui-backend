@@ -135,3 +135,65 @@ export async function searchSpotifyTracks(
   )
   return res?.tracks?.items ?? []
 }
+
+/**
+ * Acha a gravação exata pelo ISRC — a ponte entre o id do Deezer (onde o
+ * Observatório mede) e o id do Spotify (como as páginas do site são
+ * endereçadas). Ver mirsui-backend/migrations/014_ponte_spotify.sql.
+ *
+ * NÃO usa searchSpotifyTracks() de propósito. Aquela devolve `[]` tanto para
+ * "o Spotify não tem esta gravação" quanto para "a requisição falhou", e para
+ * um job que grava marca de "já tentei" essa diferença é tudo: confundir as
+ * duas queima a faixa permanentemente por causa de um 429 passageiro. Foi
+ * exatamente o que aconteceu no primeiro backfill — 1.904 faixas marcadas como
+ * inexistentes quando o Spotify só estava limitando a taxa.
+ *
+ * `falhou: true` significa "não sei, pergunte de novo depois".
+ */
+export async function findSpotifyIdByIsrc(
+  isrc: string,
+  tentativas = 3
+): Promise<{ id: string | null; falhou: boolean }> {
+  const codigo = isrc.trim()
+  if (!codigo) return { id: null, falhou: false }
+
+  const token = await getAccessToken()
+  if (!token) return { id: null, falhou: true }
+
+  const url =
+    'https://api.spotify.com/v1/search?type=track&limit=1&market=BR&q=' +
+    encodeURIComponent(`isrc:${codigo}`)
+
+  for (let n = 0; n < tentativas; n++) {
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+
+      if (res.status === 429) {
+        // O Spotify diz em quantos segundos voltar. Respeitar é mais rápido que
+        // insistir, porque insistir renova a punição.
+        const espera = Number(res.headers.get('Retry-After')) || 2
+        await new Promise((r) => setTimeout(r, (espera + 1) * 1000))
+        continue
+      }
+
+      if (res.status === 401) {
+        cachedAccessToken = null
+        cachedTokenExpiry = null
+        return { id: null, falhou: true }
+      }
+
+      if (!res.ok) return { id: null, falhou: true }
+
+      const json = (await res.json()) as SpotifySearchResponse
+      // Resposta boa e vazia: o Spotify realmente não tem esta gravação no
+      // mercado BR. É resultado, não falha.
+      return { id: json?.tracks?.items?.[0]?.id ?? null, falhou: false }
+    } catch {
+      return { id: null, falhou: true }
+    }
+  }
+
+  return { id: null, falhou: true }
+}
