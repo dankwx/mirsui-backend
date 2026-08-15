@@ -30,10 +30,28 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 |---|---|---|
 | `SUPABASE_URL` | Sim | URL do projeto Supabase |
 | `SUPABASE_KEY` | Sim | Chave do Supabase. **Obs:** `POST /auth/logout` usa `auth.admin.signOut()`, que exige a service role key — com a anon key o logout no servidor falha silenciosamente (o cliente ainda recebe sucesso) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Sim em produção | Chave privada usada exclusivamente pelos jobs do Observatório e dos Stakes; nunca vai para o frontend |
 | `FRONTEND_URL` | Não | Origem extra permitida no CORS e destino padrão do link de reset de senha |
 | `PORT` | Não | Porta do servidor (padrão: `3000`) |
+| `OBS_DESCOBERTA_ATIVA` | Não | Liga a descoberta diária por rádio do Deezer (padrão: `true`) |
+| `OBS_DESCOBERTA_META_INICIAL` | Não | Meta da expansão inicial do catálogo (padrão: `6604`) |
+| `OBS_LIMITE_DESCOBERTA` | Não | Novas faixas por dia depois da meta inicial (padrão: `250`) |
+| `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`) |
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
+
+### Jobs diários
+
+- **05:00 — Observatório:** atualiza charts, mede o catálogo, completa ISRC e
+  Spotify e, por último, descobre faixas semelhantes pelo rádio de artista do
+  Deezer. A primeira expansão tenta chegar a 6.604 faixas; depois cresce no
+  máximo 250 por dia, até 10 mil.
+- **09:00 — Stakes:** mede os stakes ativos e credita a evolução diária.
+
+A descoberta é idempotente por semente, não marca falhas transitórias como
+concluídas e grava faixa, histórico e linhagem na mesma transação. A decisão,
+os motivos e o procedimento de desligamento estão em
+[`docs/decisions/001-descoberta-controlada-de-faixas.md`](docs/decisions/001-descoberta-controlada-de-faixas.md).
 
 ## Estrutura do projeto
 

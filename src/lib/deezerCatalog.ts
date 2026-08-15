@@ -174,6 +174,12 @@ export interface FaixaObservada {
   rank: number
 }
 
+export interface ResultadoRadioArtista {
+  faixas: FaixaObservada[]
+  /** Rede, quota ou resposta inválida: não marque a semente, tente amanhã. */
+  falhou: boolean
+}
+
 /**
  * Gêneros do Deezer. Vem da API para não engessar ids que podem mudar; se a
  * chamada falhar, cai numa lista mínima conhecida para o job não passar a noite
@@ -309,4 +315,52 @@ export async function buscarPorTexto(
     source_list: 'acervo',
     rank: t.rank,
   }
+}
+
+/**
+ * Rádio de um artista: mistura faixas do próprio artista e de artistas
+ * relacionados. É a aproximação pública do Deezer para "música semelhante";
+ * ao contrário do endpoint de artistas relacionados, uma chamada já devolve
+ * as próprias faixas candidatas com rank e metadados suficientes para entrar
+ * no Observatório.
+ *
+ * O endpoint não traz ISRC. A etapa de ISRC do próximo snapshot completa essa
+ * ponte antes de tentar resolver a faixa no Spotify.
+ */
+export async function radioDoArtista(
+  deezerArtistId: string,
+  limite = 15
+): Promise<ResultadoRadioArtista> {
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limite)))
+  const res = await dz<DeezerLista<DeezerFaixa>>(
+    `/artist/${encodeURIComponent(deezerArtistId)}/radio?limit=${safeLimit}`
+  )
+
+  if (!res || res.error || !Array.isArray(res.data)) {
+    return { faixas: [], falhou: true }
+  }
+
+  const faixas = res.data.flatMap((t) => {
+    if (t.id == null || typeof t.rank !== 'number') return []
+    const titulo = t.title || t.title_short
+    const artista = t.artist?.name
+    if (!titulo || !artista) return []
+
+    return [
+      {
+        deezer_track_id: String(t.id),
+        deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+        isrc: null,
+        title: titulo,
+        artist_name: artista,
+        album_name: t.album?.title ?? null,
+        cover_md5: extrairCoverMd5(t.album),
+        genre: null,
+        source_list: `radio:${deezerArtistId}`,
+        rank: t.rank,
+      },
+    ]
+  })
+
+  return { faixas, falhou: false }
 }

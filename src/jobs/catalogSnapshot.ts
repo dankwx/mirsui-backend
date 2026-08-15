@@ -24,6 +24,7 @@
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
 import { findSpotifyIdByIsrc } from '../lib/spotify'
+import { runCatalogDiscovery } from './catalogDiscovery'
 import {
   listarGeneros,
   chartDoGenero,
@@ -48,6 +49,10 @@ export interface ResultadoObservatorio {
   spotifyNaoAchados: number
   /** requisições que falharam (429, rede): voltam à fila amanhã */
   spotifyFalhasTransitorias: number
+  descobertaSementes: number
+  descobertaNovas: number
+  descobertaSemCandidata: number
+  descobertaFalhasApi: number
   desativadas: number
   falhas: number
 }
@@ -85,6 +90,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     spotifyResolvidos: 0,
     spotifyNaoAchados: 0,
     spotifyFalhasTransitorias: 0,
+    descobertaSementes: 0,
+    descobertaNovas: 0,
+    descobertaSemCandidata: 0,
+    descobertaFalhasApi: 0,
     desativadas: 0,
     falhas: 0,
   }
@@ -529,6 +538,24 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: etapa do Spotify falhou')
+  }
+
+  // -------------------------------------------------------------------------
+  // 6. Descoberta controlada de faixas semelhantes
+  // -------------------------------------------------------------------------
+  // Vem por último para que as faixas descobertas hoje só entrem nas filas de
+  // medição individual, ISRC e Spotify amanhã. Assim a expansão inicial não
+  // multiplica, na mesma rodada, todas as chamadas mais caras do job.
+  try {
+    const descoberta = await runCatalogDiscovery(log)
+    resultado.descobertaSementes = descoberta.sementesProcessadas
+    resultado.descobertaNovas = descoberta.novas
+    resultado.descobertaSemCandidata = descoberta.semCandidata
+    resultado.descobertaFalhasApi = descoberta.falhasApi
+    resultado.pontos += descoberta.pontos
+  } catch (err) {
+    resultado.falhas++
+    log.error({ err }, 'Observatório: descoberta de faixas falhou')
   }
 
   log.info(

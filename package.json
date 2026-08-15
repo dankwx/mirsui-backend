@@ -11,7 +11,7 @@
     "start": "tsx src/server.ts",
     "observatorio": "tsx src/scripts/runCatalogSnapshot.ts",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",
