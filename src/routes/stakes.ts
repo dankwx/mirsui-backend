@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { supabaseForUser } from '../lib/supabase'
+import { supabaseAdmin, supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 import { resolveTrack } from '../lib/deezer'
 import { computeMultiplier, popScore, fameScore } from '../lib/stakePoints'
@@ -186,7 +186,16 @@ export default async function stakeRoutes(app: FastifyInstance) {
     }
 
     const userId = request.user.id
+    // Leitura com o token do usuário (a RLS confere que as linhas são dele).
+    // Escrita com a service role: desde o migration 018 `authenticated` não tem
+    // INSERT em stakes, porque baseline_popularity e multiplier vêm do Deezer,
+    // medidos aqui embaixo — não são valor que o cliente possa mandar.
     const supabase = supabaseForUser(request.accessToken)
+
+    if (!supabaseAdmin) {
+      app.log.error({}, 'SUPABASE_SERVICE_ROLE_KEY ausente — POST /stakes indisponível')
+      return reply.code(503).send({ error: 'Stakes indisponíveis no momento' })
+    }
 
     // Limite de 3 vagas (stakes ativos)
     const { count: activeCount, error: countError } = await supabase
@@ -233,7 +242,7 @@ export default async function stakeRoutes(app: FastifyInstance) {
     const artistFame = fameScore(resolved.nbFan)
     const multiplier = computeMultiplier(artistFame, baselinePopularity)
 
-    const { data: inserted, error: insertError } = await supabase
+    const { data: inserted, error: insertError } = await supabaseAdmin
       .from('stakes')
       .insert([
         {
@@ -260,12 +269,17 @@ export default async function stakeRoutes(app: FastifyInstance) {
       .single()
 
     if (insertError || !inserted) {
+      // 23505 = o índice único parcial (um stake ativo por faixa) pegou uma
+      // corrida que passou pela checagem de duplicata lá em cima.
+      if (insertError?.code === '23505') {
+        return reply.code(409).send({ error: 'Você já deu stake nessa faixa' })
+      }
       app.log.error({ err: insertError, userId }, 'Erro ao inserir stake')
       return reply.code(500).send({ error: 'Erro ao salvar stake' })
     }
 
     // Snapshot inicial (dia 0): baseline, sem ganho
-    await supabase.from('stake_snapshots').insert([
+    await supabaseAdmin.from('stake_snapshots').insert([
       {
         stake_id: inserted.id,
         popularity: baselinePopularity,
@@ -296,59 +310,28 @@ export default async function stakeRoutes(app: FastifyInstance) {
       const userId = request.user.id
       const supabase = supabaseForUser(request.accessToken)
 
-      const { data: stake, error } = await supabase
-        .from('stakes')
-        .select('*')
-        .eq('id', id)
-        .eq('user_id', userId)
-        .maybeSingle()
+      // Ler-decidir-escrever em duas tabelas mora no banco desde o migration
+      // 018: `collect_stake` é SECURITY DEFINER, roda tudo numa transação só e
+      // dá `for update` na linha do stake. Assim dois "recolher" simultâneos não
+      // gravam dois lançamentos do mesmo saldo, e a regra dos 7 dias vale mesmo
+      // que a chamada não venha por aqui. Vai com o token do usuário: quem
+      // autoriza é o `auth.uid()` lá dentro.
+      const { data, error } = await supabase.rpc('collect_stake', { p_stake_id: id }).single()
 
       if (error) {
-        app.log.error({ err: error }, 'Erro ao buscar stake para recolher')
+        app.log.error({ err: error, userId, stakeId: id }, 'Erro ao recolher stake')
         return reply.code(500).send({ error: 'Erro ao recolher' })
       }
-      if (!stake) {
+
+      const result = data as { found: boolean; collected: boolean; points: number } | null
+      if (!result?.found) {
         return reply.code(404).send({ error: 'Stake não encontrado' })
-      }
-
-      const held = daysHeld(stake.staked_at)
-      const canCollect = stake.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT
-
-      // Só coleta pontos se ficou >= 7 dias E ainda está ativo (não removido)
-      if (canCollect && stake.accumulated_points > 0) {
-        const { error: ledgerError } = await supabase.from('stake_collections').insert([
-          {
-            user_id: userId,
-            stake_id: stake.id,
-            track_title: stake.track_title,
-            artist_name: stake.artist_name,
-            points: stake.accumulated_points,
-          },
-        ])
-        if (ledgerError) {
-          app.log.error({ err: ledgerError }, 'Erro ao registrar coleta')
-          return reply.code(500).send({ error: 'Erro ao coletar pontos' })
-        }
-      }
-
-      const collectedPoints = canCollect ? stake.accumulated_points : 0
-
-      // A linha some da página (esvazia a vaga). Mantemos 'coletada' para histórico
-      // quando houve coleta; senão, removemos de vez.
-      if (collectedPoints > 0) {
-        await supabase
-          .from('stakes')
-          .update({ status: 'coletada', collected_at: new Date().toISOString() })
-          .eq('id', stake.id)
-          .eq('user_id', userId)
-      } else {
-        await supabase.from('stakes').delete().eq('id', stake.id).eq('user_id', userId)
       }
 
       return reply.send({
         success: true,
-        collected: collectedPoints > 0,
-        points: collectedPoints,
+        collected: result.collected,
+        points: result.points,
       })
     }
   )
