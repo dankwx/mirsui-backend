@@ -7,7 +7,8 @@
 // conferir depois de mexer no job. É idempotente por dia: rodar de novo hoje
 // atualiza o rank medido, mas não cria um segundo ponto no histórico.
 //
-// Tetos podem ser reduzidos por env para um teste rápido, ex.:
+// Por padrão a rodada não tem teto: varre o catálogo até acabar. Para um teste
+// rápido, as envs abaixo cortam cada etapa (0 desliga a etapa), ex.:
 //   OBS_MAX_GENEROS=2 OBS_LIMITE_MEDICAO=0 OBS_LIMITE_ACERVO=0 npm run observatorio
 
 import { runCatalogSnapshot } from '../jobs/catalogSnapshot'

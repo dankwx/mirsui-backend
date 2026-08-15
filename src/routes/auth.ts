@@ -13,6 +13,17 @@ const perEmail = { hook: 'preValidation' as const, keyGenerator: emailKey }
 const DEFAULT_AVATAR_URL =
   'https://tqprioqqitimssshcrcr.supabase.co/storage/v1/object/public/user-profile-images/default.jpg'
 
+// Formato mínimo de email — quem valida de verdade é o GoTrue. Aqui é só pra
+// não deixar string arbitrária entrar em log nem virar trabalho à toa.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MAX_EMAIL_LENGTH = 254
+const MIN_USERNAME_LENGTH = 3
+const MAX_USERNAME_LENGTH = 30
+
+// Conta nova e email já cadastrado respondem exatamente isto. Ver o
+// tratamento do authError no signup.
+const SIGNUP_OK = 'Conta criada com sucesso! Verifique seu email para confirmar.'
+
 function generateRandomDisplayName(): string {
   const adjectives = [
     'Happy', 'Lucky', 'Clever', 'Brave', 'Gentle',
@@ -39,38 +50,59 @@ export default async function authRoutes(app: FastifyInstance) {
       rateLimit: { max: 5, timeWindow: '1 hour', ...perEmail }
     }
   }, async (request, reply) => {
-    const { email, password, username } = request.body ?? {}
+    // A rota não tem schema de validação: o corpo é o que o cliente mandar.
+    const raw = (request.body ?? {}) as Partial<Record<'email' | 'password' | 'username', unknown>>
+    const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : ''
+    const password = typeof raw.password === 'string' ? raw.password : ''
+    const username = typeof raw.username === 'string' ? raw.username.trim() : ''
 
     if (!email || !password || !username) {
       return reply.code(400).send({ error: 'Email, senha e username são obrigatórios' })
+    }
+
+    if (email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
+      return reply.code(400).send({ error: 'Email inválido' })
     }
 
     if (password.length < 6) {
       return reply.code(400).send({ error: 'A senha deve ter no mínimo 6 caracteres' })
     }
 
-    if (username.length < 3) {
-      return reply.code(400).send({ error: 'Username deve ter no mínimo 3 caracteres' })
+    if (username.length < MIN_USERNAME_LENGTH || username.length > MAX_USERNAME_LENGTH) {
+      return reply
+        .code(400)
+        .send({ error: `Username deve ter entre ${MIN_USERNAME_LENGTH} e ${MAX_USERNAME_LENGTH} caracteres` })
     }
 
     if (!/^[a-zA-Z0-9_]+$/.test(username)) {
       return reply.code(400).send({ error: 'Username pode conter apenas letras, números e underscore' })
     }
 
-    // Verificar se username ou email já existem (uma única query na tabela profiles)
-    const { data: existingProfile } = await supabase
+    // Só o username é checado aqui, e com .eq(): o valor vai como parâmetro
+    // codificado, não concatenado numa string de filtro. O .or() de antes
+    // montava `username.eq.${username},email.eq.${email}` na mão — e o email
+    // não passava por validação nenhuma, então dava pra fechar a condição e
+    // injetar operadores do PostgREST no filtro.
+    //
+    // O email saiu do pré-check de propósito. Além de o `anon` não ter select
+    // na coluna (a migration de RLS revogou, então a query inteira falhava com
+    // permission denied e o check nunca rodou de verdade), duas mensagens
+    // distintas — "username em uso" vs "email já cadastrado" — fazem do signup
+    // um oráculo pra descobrir quem tem conta aqui. Username já é público em
+    // /profiles; email não é, e não pode virar.
+    const { data: usernameEmUso, error: lookupError } = await supabase
       .from('profiles')
-      .select('username, email')
-      .or(`username.eq.${username},email.eq.${email}`)
+      .select('id')
+      .eq('username', username)
       .maybeSingle()
 
-    if (existingProfile) {
-      if (existingProfile.username === username) {
-        app.log.warn({ username }, 'Tentativa de cadastro com username já existente')
-        return reply.code(400).send({ error: 'Username já está em uso' })
-      }
-      app.log.warn({ email }, 'Tentativa de cadastro com email já existente')
-      return reply.code(400).send({ error: 'Este email já está cadastrado' })
+    if (lookupError) {
+      // Sem resposta do banco não dá pra afirmar nada; a UNIQUE de
+      // profiles.username continua sendo a garantia real (tratada abaixo).
+      app.log.error({ err: lookupError }, 'Erro ao checar username no signup')
+    } else if (usernameEmUso) {
+      app.log.warn({ username }, 'Tentativa de cadastro com username já existente')
+      return reply.code(400).send({ error: 'Username já está em uso' })
     }
 
     // O profile será criado automaticamente via trigger no Supabase
@@ -87,17 +119,35 @@ export default async function authRoutes(app: FastifyInstance) {
     })
 
     if (authError) {
-      if (authError.message.includes('already registered')) {
-        return reply.code(400).send({ error: 'Este email já está cadastrado' })
+      // Email já cadastrado responde igualzinho a um cadastro novo: 201 com a
+      // mesma mensagem e sem user/session. Quem é dono do email fica sabendo
+      // pelo email que o GoTrue manda; quem está sondando de fora, não.
+      if (authError.code === 'user_already_exists' || authError.message.includes('already registered')) {
+        app.log.warn({ email }, 'Tentativa de cadastro com email já existente')
+        return reply.code(201).send({ message: SIGNUP_OK, user: null, session: null })
       }
-      return reply.code(400).send({ error: authError.message })
+
+      // O trigger handle_new_user insere em profiles dentro da transação do
+      // GoTrue; se a UNIQUE de username estourar (corrida com o check acima),
+      // volta como "Database error saving new user".
+      if (/database error/i.test(authError.message)) {
+        app.log.error({ err: authError, username }, 'Erro do banco ao criar usuário')
+        return reply.code(400).send({ error: 'Não foi possível criar a conta. Tente outro username.' })
+      }
+
+      // Mensagem crua do GoTrue fica no log, não na resposta.
+      app.log.warn({ err: authError }, 'Signup recusado pelo GoTrue')
+      return reply.code(400).send({ error: 'Não foi possível criar a conta' })
     }
 
     app.log.info({ userId: authData.user?.id, username }, 'Usuário criado no Auth')
 
+    // Com confirmação de email ligada não vem sessão — e aí o user também não
+    // vai junto, senão a resposta do cadastro novo (user preenchido) voltaria a
+    // se distinguir da do email repetido (user null).
     return reply.code(201).send({
-      message: 'Conta criada com sucesso! Verifique seu email para confirmar.',
-      user: authData.user,
+      message: SIGNUP_OK,
+      user: authData.session ? authData.user : null,
       session: authData.session
     })
   })

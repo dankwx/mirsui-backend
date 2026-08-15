@@ -8,12 +8,14 @@
 //    `rank`. Ou seja: uma requisição mede 100 faixas. É por isso que a varredura
 //    por gênero é a espinha do job — ~30 requisições cobrem ~3.000 faixas por
 //    noite. Medir uma a uma (/track/{id}) só é preciso para faixa que já está
-//    no Observatório e caiu fora do chart, e isso tem teto por rodada.
+//    no Observatório e caiu fora do chart — é a parte que custa uma requisição
+//    por faixa, e por isso a que dita quanto tempo a rodada leva.
 //
 // 2. RATE LIMIT.
 //    O Deezer corta em ~50 requisições a cada 5s. Ele não devolve Retry-After:
 //    responde erro 4 ("Quota limit exceeded") ou simplesmente para. Todo acesso
-//    daqui passa por `throttled()`, que serializa e espaça as chamadas.
+//    daqui passa por `throttled()`, que espaça as partidas e limita quantas
+//    requisições ficam em voo ao mesmo tempo.
 //
 // Este arquivo tem o próprio `dz()` em vez de reusar o de src/lib/deezer.ts de
 // propósito: lá as chamadas nascem de ação do usuário (resolver uma faixa que
@@ -24,6 +26,10 @@ const BASE = 'https://api.deezer.com'
 
 // ~8 req/s, com folga sob o teto de 10 req/s (50 a cada 5s).
 const INTERVALO_MS = 125
+// Teto de requisições em voo. A ~500ms de latência, 8 partidas por segundo
+// deixam ~4 abertas ao mesmo tempo; o teto existe para o dia em que o Deezer
+// ficar lento, quando sem ele a fila abriria dezenas de conexões de uma vez.
+const EM_VOO_MAX = 6
 const RETENTATIVAS_QUOTA = 2
 const ESPERA_QUOTA_MS = 5_000
 
@@ -68,23 +74,66 @@ interface DeezerGenero {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// Fila serial: cada chamada espera a anterior terminar e mais INTERVALO_MS.
-let fila: Promise<unknown> = Promise.resolve()
+// A fila era serial: cada chamada esperava a resposta da anterior e só então
+// contava o intervalo. Isso fazia a latência do Deezer (~500ms) mandar no ritmo
+// e a varredura andava a ~1,5 req/s — menos de um quinto do que a cota permite.
+// Enquanto o job tinha teto de faixas por rodada isso passava despercebido; sem
+// teto, cada req/s desperdiçado vira hora de rodada. Agora o que se agenda é a
+// PARTIDA de cada chamada, uma a cada INTERVALO_MS, e a resposta que demore
+// segura só a vaga dela.
 
-function throttled<T>(fn: () => Promise<T>): Promise<T> {
-  const proxima = fila.then(async () => {
-    const saida = await fn()
-    await sleep(INTERVALO_MS)
-    return saida
-  })
-  // A fila não pode morrer por causa de uma falha isolada.
-  fila = proxima.catch(() => undefined)
-  return proxima
+/** Instante (ms) em que a próxima chamada pode partir. */
+let proximaLargada = 0
+let emVoo = 0
+const esperandoVaga: (() => void)[] = []
+
+async function pegarVaga(): Promise<void> {
+  // Ao acordar, a vaga já veio de quem terminou — por isso não incrementa aqui.
+  if (emVoo >= EM_VOO_MAX) return new Promise<void>((r) => esperandoVaga.push(r))
+  emVoo++
+}
+
+function liberarVaga(): void {
+  const proximo = esperandoVaga.shift()
+  if (proximo) proximo()
+  else emVoo--
+}
+
+/** Reserva o próximo horário de partida e espera até ele chegar. */
+async function aguardarLargada(): Promise<void> {
+  const agora = Date.now()
+  const largada = Math.max(agora, proximaLargada)
+  proximaLargada = largada + INTERVALO_MS
+  if (largada > agora) await sleep(largada - agora)
+}
+
+/**
+ * Segura a fila INTEIRA por um tempo. Quota estourada não é problema de uma
+ * chamada só: se apenas quem levou o erro esperasse, as outras continuariam
+ * partindo no mesmo ritmo e manteriam o Deezer irritado.
+ */
+function frearFila(ms: number): void {
+  proximaLargada = Math.max(proximaLargada, Date.now() + ms)
+}
+
+async function throttled<T>(fn: () => Promise<T>): Promise<T> {
+  // A vaga vem antes do horário: reservar largada enquanto se está bloqueado
+  // deixaria horários vencidos acumulados, e eles sairiam todos de uma vez.
+  await pegarVaga()
+  try {
+    await aguardarLargada()
+    return await fn()
+  } finally {
+    liberarVaga()
+  }
 }
 
 async function dz<T>(path: string): Promise<T | null> {
   return throttled(async () => {
     for (let tentativa = 0; tentativa <= RETENTATIVAS_QUOTA; tentativa++) {
+      // A primeira largada é a que throttled() já esperou; as retentativas
+      // pegam um horário novo, que o freio abaixo empurrou para a frente.
+      if (tentativa > 0) await aguardarLargada()
       try {
         const r = await fetch(BASE + path)
         if (!r.ok) return null
@@ -92,7 +141,7 @@ async function dz<T>(path: string): Promise<T | null> {
         // code 4 = quota estourada. Vale esperar e tentar de novo; qualquer
         // outro erro é da própria faixa e quem chamou decide o que fazer.
         if (json?.error?.code === 4 && tentativa < RETENTATIVAS_QUOTA) {
-          await sleep(ESPERA_QUOTA_MS)
+          frearFila(ESPERA_QUOTA_MS)
           continue
         }
         return json

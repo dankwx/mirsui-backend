@@ -13,9 +13,9 @@
 //      não estavam sendo medidas. É a ponta obscura do catálogo — o chart sozinho
 //      enviesa tudo para o que já estourou, e "antes de estourar" é a tese.
 //   3. Mede individualmente quem já é observado mas não apareceu em chart hoje,
-//      do menos recentemente medido para o mais recente, com teto por rodada.
-//      É o passo que faz o Observatório continuar seguindo uma faixa depois que
-//      ela sai do chart — inclusive na descida.
+//      do menos recentemente medido para o mais recente. É o passo que faz o
+//      Observatório continuar seguindo uma faixa depois que ela sai do chart —
+//      inclusive na descida.
 //
 // Nada aqui é obrigatório para o job ser útil: se um passo falhar, os outros
 // gravam mesmo assim. Um dia com metade dos pontos vale muito mais que um dia
@@ -54,6 +54,11 @@ export interface ResultadoObservatorio {
 
 // Teto configurável por env. Aceita 0 — é assim que se desliga uma etapa numa
 // rodada de teste. Só variável ausente ou vazia cai no padrão.
+//
+// O padrão das filas é Infinity: o job varre até acabar, e não até bater numa
+// conta. Um teto de contagem tem o defeito de ser silencioso — no dia em que o
+// catálogo passa dele, faixas somem da série do dia e nada no log grita. As
+// envs continuam existindo para RE-limitar de propósito numa rodada de teste.
 const num = (chave: string, padrao: number) => {
   const bruto = process.env[chave]
   if (bruto == null || bruto.trim() === '') return padrao
@@ -90,12 +95,14 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   }
   const db = supabaseAdmin
 
-  const maxGeneros = num('OBS_MAX_GENEROS', 40)
+  const maxGeneros = num('OBS_MAX_GENEROS', Infinity)
+  // Este é o único teto real que sobra, e não é nosso: 100 é o máximo que
+  // /chart/{id}/tracks devolve numa resposta.
   const limiteChart = num('OBS_LIMITE_CHART', 100)
-  const limiteAcervo = num('OBS_LIMITE_ACERVO', 25)
-  const limiteMedicao = num('OBS_LIMITE_MEDICAO', 400)
-  const limiteIsrc = num('OBS_LIMITE_ISRC', 300)
-  const limiteSpotify = num('OBS_LIMITE_SPOTIFY', 300)
+  const limiteAcervo = num('OBS_LIMITE_ACERVO', Infinity)
+  const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
+  const limiteIsrc = num('OBS_LIMITE_ISRC', Infinity)
+  const limiteSpotify = num('OBS_LIMITE_SPOTIFY', Infinity)
 
   const resultado = { ...vazio }
   const inicio = Date.now()
@@ -124,14 +131,46 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     return gravados
   }
 
+  /**
+   * Lê uma fila inteira do banco, contornando o teto de linhas do PostgREST.
+   *
+   * O Supabase corta TODA resposta em 1.000 linhas (db-max-rows). O `.limit()`
+   * do cliente não levanta esse teto: pedir 3.000 devolve 1.000 e não avisa —
+   * a rodada simplesmente faz um terço do trabalho achando que fez tudo. Por
+   * isso a leitura vai por páginas de 1.000 via .range(), que é inclusivo.
+   *
+   * Seguro contra deslocamento de offset porque as marcas (isrc_checked_at,
+   * last_checked_at) só são gravadas depois, fora desta leitura.
+   *
+   * `limite` aceita Infinity, que é o padrão: nesse caso a paginação só para
+   * quando uma página volta incompleta, ou seja, quando a fila acabou de fato.
+   */
+  const lerFila = async <T>(
+    montarQuery: () => { range: (de: number, ate: number) => PromiseLike<{ data: unknown; error: unknown }> },
+    limite: number
+  ): Promise<T[]> => {
+    const PAGINA = 1000
+    const tudo: T[] = []
+    for (let offset = 0; offset < limite; offset += PAGINA) {
+      const pedaco = Math.min(PAGINA, limite - offset)
+      const { data, error } = await montarQuery().range(offset, offset + pedaco - 1)
+      if (error) throw error
+      const lote = (data ?? []) as T[]
+      tudo.push(...lote)
+      if (lote.length < pedaco) break // acabou a fila
+    }
+    return tudo
+  }
+
   // -------------------------------------------------------------------------
   // 1. Charts por gênero
   // -------------------------------------------------------------------------
   const vistasHoje = new Set<string>()
   try {
     const generos = await listarGeneros()
-    // O gênero 0 ("Todos") é o chart global e vale sempre; os demais entram até
-    // o teto, para a rodada não crescer sem limite se o Deezer criar gêneros.
+    // O gênero 0 ("Todos") é o chart global e vale sempre; os demais vêm todos.
+    // Gênero é barato: uma requisição cobre até 100 faixas, e o Deezer tem
+    // pouco mais de vinte deles — cortar em 40 nunca economizou nada de real.
     const alvo = [
       { id: 0, name: 'Todos' },
       ...generos.filter((g) => g.id !== 0).slice(0, maxGeneros),
@@ -166,19 +205,18 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // -------------------------------------------------------------------------
   try {
     // As faixas que as pessoas salvaram. Uma linha por pessoa que salvou, então
-    // desduplicamos por artista+título aqui mesmo.
-    const { data: salvas, error } = await db
-      .from('tracks')
-      .select('track_title, artist_name')
-      .order('id', { ascending: false })
-      .limit(500)
-
-    if (error) throw error
+    // desduplicamos por artista+título aqui mesmo. Vai por lerFila() porque o
+    // acervo inteiro importa: um teto aqui esconderia justamente o salvamento
+    // antigo que nunca entrou no Observatório.
+    const salvas = await lerFila<{ track_title?: string; artist_name?: string }>(
+      () => db.from('tracks').select('track_title, artist_name').order('id', { ascending: false }),
+      Infinity
+    )
 
     const unicas = new Map<string, { titulo: string; artista: string }>()
-    for (const t of salvas ?? []) {
-      const titulo = (t as { track_title?: string }).track_title
-      const artista = (t as { artist_name?: string }).artist_name
+    for (const t of salvas) {
+      const titulo = t.track_title
+      const artista = t.artist_name
       if (!titulo || !artista) continue
       const chave = `${artista.toLowerCase()}|${titulo.toLowerCase()}`
       if (!unicas.has(chave)) unicas.set(chave, { titulo, artista })
@@ -186,16 +224,24 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
 
     // Só resolvemos quem ainda não está no Observatório. Como a ponte é por
     // busca textual (o acervo não guarda ISRC), comparamos pelo par já gravado.
-    const { data: jaObservadas } = await db
-      .from('observed_tracks')
-      .select('title, artist_name')
-      .eq('source_list', 'acervo')
+    // Também paginado: uma lista truncada aqui não erra para o lado seguro —
+    // faria o job re-buscar no Deezer, todo dia, faixa que já é observada.
+    const jaObservadas = await lerFila<{ title?: string; artist_name?: string }>(
+      () =>
+        db
+          .from('observed_tracks')
+          .select('title, artist_name')
+          .eq('source_list', 'acervo')
+          // Ordem explícita: sem ela a paginação por .range() pode repetir ou
+          // pular linhas entre uma página e outra.
+          .order('deezer_track_id', { ascending: true }),
+      Infinity
+    )
 
     const conhecidas = new Set(
-      (jaObservadas ?? []).map(
+      jaObservadas.map(
         (o) =>
-          `${String((o as { artist_name?: string }).artist_name ?? '').toLowerCase()}|` +
-          `${String((o as { title?: string }).title ?? '').toLowerCase()}`
+          `${String(o.artist_name ?? '').toLowerCase()}|${String(o.title ?? '').toLowerCase()}`
       )
     )
 
@@ -203,9 +249,13 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       .filter(([chave]) => !conhecidas.has(chave))
       .slice(0, limiteAcervo)
 
+    // Também em paralelo, pelo mesmo motivo da etapa 3: o ritmo é da fila.
+    const achadas = await Promise.all(
+      pendentes.map(([, { titulo, artista }]) => buscarPorTexto(artista, titulo))
+    )
+
     const doAcervo: FaixaObservada[] = []
-    for (const [, { titulo, artista }] of pendentes) {
-      const achada = await buscarPorTexto(artista, titulo)
+    for (const achada of achadas) {
       if (achada && !vistasHoje.has(achada.deezer_track_id)) {
         doAcervo.push(achada)
         vistasHoje.add(achada.deezer_track_id)
@@ -221,34 +271,6 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: incorporação do acervo falhou')
-  }
-
-  /**
-   * Lê uma fila inteira do banco, contornando o teto de linhas do PostgREST.
-   *
-   * O Supabase corta TODA resposta em 1.000 linhas (db-max-rows). O `.limit()`
-   * do cliente não levanta esse teto: pedir 3.000 devolve 1.000 e não avisa —
-   * a rodada simplesmente faz um terço do trabalho achando que fez tudo. Por
-   * isso a leitura vai por páginas de 1.000 via .range(), que é inclusivo.
-   *
-   * Seguro contra deslocamento de offset porque as marcas (isrc_checked_at,
-   * last_checked_at) só são gravadas depois, fora desta leitura.
-   */
-  const lerFila = async <T>(
-    montarQuery: () => { range: (de: number, ate: number) => PromiseLike<{ data: unknown; error: unknown }> },
-    limite: number
-  ): Promise<T[]> => {
-    const PAGINA = 1000
-    const tudo: T[] = []
-    for (let offset = 0; offset < limite; offset += PAGINA) {
-      const pedaco = Math.min(PAGINA, limite - offset)
-      const { data, error } = await montarQuery().range(offset, offset + pedaco - 1)
-      if (error) throw error
-      const lote = (data ?? []) as T[]
-      tudo.push(...lote)
-      if (lote.length < pedaco) break // acabou a fila
-    }
-    return tudo
   }
 
   // Uma faixa não é consultada duas vezes na mesma rodada, mesmo que caia nos
@@ -267,19 +289,33 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
    * Consulta /track/{id} de cada linha e monta as medições prontas para gravar.
    * A mesma resposta traz rank e ISRC, então as etapas 3 e 4 compartilham este
    * caminho — quem é medido também ganha ISRC, sem requisição extra.
+   *
+   * As consultas saem todas de uma vez porque quem controla o ritmo é a fila de
+   * deezerCatalog.ts, não este laço. Pedir uma faixa, esperar a resposta e só
+   * então pedir a próxima somava a latência do Deezer a CADA faixa e segurava a
+   * varredura em ~3,5 req/s mesmo com a cota permitindo 10.
    */
   const consultarLote = async (linhas: LinhaObservada[]) => {
+    // O de-dup é feito antes de disparar, e de uma vez: assim continua valendo
+    // "uma consulta por faixa por rodada" mesmo com as chamadas concorrentes.
+    const aConsultar = linhas.filter((r) => {
+      if (consultadasNestaRodada.has(r.deezer_track_id)) return false
+      consultadasNestaRodada.add(r.deezer_track_id)
+      return true
+    })
+
+    const respostas = await Promise.all(
+      aConsultar.map(async (linha) => ({
+        linha,
+        ...(await buscarFaixa(linha.deezer_track_id)),
+      }))
+    )
+
     const medidas: FaixaObservada[] = []
     const sumiram: string[] = []
-    const tentados: string[] = []
+    const tentados = aConsultar.map((r) => r.deezer_track_id)
 
-    for (const r of linhas) {
-      if (consultadasNestaRodada.has(r.deezer_track_id)) continue
-      consultadasNestaRodada.add(r.deezer_track_id)
-      tentados.push(r.deezer_track_id)
-
-      const { faixa, notFound } = await buscarFaixa(r.deezer_track_id)
-
+    for (const { linha: r, faixa, notFound } of respostas) {
       if (notFound) {
         sumiram.push(r.deezer_track_id)
         continue

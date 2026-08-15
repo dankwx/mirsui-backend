@@ -11,6 +11,7 @@ import feedRoutes from './routes/feed'
 import claimRoutes from './routes/claims'
 import trackRoutes from './routes/tracks'
 import stakeRoutes from './routes/stakes'
+import adminRoutes from './routes/admin'
 
 export async function buildApp() {
   const app = Fastify({ logger: true })
@@ -75,6 +76,7 @@ export async function buildApp() {
   await app.register(claimRoutes)
   await app.register(trackRoutes)
   await app.register(stakeRoutes)
+  await app.register(adminRoutes)
 
   return app
 }

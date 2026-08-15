@@ -23,9 +23,11 @@ cron.schedule(
 // batem na mesma API do Deezer e dividir a janela evita disputar o rate limit.
 // Também é idempotente por dia (índice único em track_popularity_history).
 //
-// A rodada leva minutos, não segundos: a trava abaixo existe porque uma rodada
-// lenta que atravessasse o horário da seguinte colocaria duas varreduras
-// concorrendo pela mesma fila de requisições, dobrando o risco de quota.
+// A rodada leva minutos, não segundos, e cresce junto com o catálogo — não há
+// teto de faixas por rodada, de propósito: ver src/jobs/catalogSnapshot.ts.
+// A trava abaixo existe porque uma rodada lenta que atravessasse o horário da
+// seguinte colocaria duas varreduras concorrendo pela mesma fila de
+// requisições, dobrando o risco de quota.
 let observatorioRodando = false
 cron.schedule(
   '0 5 * * *',
