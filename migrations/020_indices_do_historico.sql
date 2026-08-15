@@ -1,0 +1,63 @@
+-- 020_indices_do_historico.sql
+-- Item 2 da análise de escala: tira os índices redundantes de
+-- track_popularity_history. Ver docs/analise-escala-apis-e-banco.md, seção 2.3.
+--
+-- ESTADO ANTES (medido em produção, 15/08/2026, 21.027 linhas)
+--
+--   índice                                tamanho   scans     colunas
+--   track_popularity_history_dia_idx      1344 kB   31.027    (track_uri, dia) UNIQUE
+--   idx_track_popularity_track_uri_date   1336 kB    4.194    (track_uri, recorded_at)
+--   idx_track_popularity_track_uri         512 kB   902.322   (track_uri)
+--   track_popularity_history_pkey          480 kB   30.986    (id)
+--   idx_track_popularity_recorded_at       176 kB       94    (recorded_at)
+--
+--   dados 1.744 kB, índices 3.848 kB — os índices são 2,2x a tabela.
+--
+-- Os três `idx_*` vieram do painel do Supabase e nunca estiveram versionados,
+-- como o 005 já registrou para as tabelas do feed. Só o `_dia_idx` nasce aqui
+-- (migration 009).
+--
+-- O QUE SAI, E POR QUÊ NÃO É O QUE A ANÁLISE DIZIA
+--
+-- A seção 2.3 mandava dropar `idx_track_popularity_track_uri` por ser "prefixo
+-- redundante" do composto. É verdade que é prefixo — e é exatamente por isso que
+-- a conclusão estava invertida: entre dois índices onde um é prefixo do outro,
+-- quem sai é o MAIOR, se o menor der conta das queries.
+--
+-- Quem lê esta tabela pergunta sempre a mesma coisa (get_track_curve na 011 e o
+-- lateral da landing na 015):
+--
+--     where track_uri = $1 and rank is not null
+--
+-- Isso é igualdade em track_uri, e o planner já resolve com o índice de 512 kB —
+-- verificado com EXPLAIN ANALYZE antes desta migration:
+--
+--     Index Scan using idx_track_popularity_track_uri
+--       Index Cond: (track_uri = $0)
+--
+-- O composto (track_uri, recorded_at) custa 2,6x o espaço para servir 0,5% dos
+-- scans. A coluna extra só ajudaria a ordenar, e a ordenação aqui é de algumas
+-- dezenas de linhas por faixa, dentro de um jsonb_agg. Some-se que o
+-- `_dia_idx` é UNIQUE em (track_uri, dia): existe no máximo uma linha por faixa
+-- por dia, então ordenar por dia já é ordenar por recorded_at.
+--
+-- O de `recorded_at` sozinho serve uma query só — a contagem de 24h do painel do
+-- dono (019) — e tem 94 scans de vida inteira contra 902 mil do outro. Num
+-- histórico append-only, faixa de tempo isolada quase nunca é seletiva.
+--
+-- Dropar os dois que a análise indicava liberaria 688 kB (18%) e empurraria o
+-- caminho quente para um índice 2,6x maior. Dropar estes dois libera 1.512 kB
+-- dos 3.848 kB — 39%, que é o ganho que a análise prometia.
+--
+-- O que fica: `_dia_idx` (idempotência do job, `on conflict do nothing`),
+-- `idx_track_popularity_track_uri` (curva e landing) e a pkey.
+
+drop index if exists public.idx_track_popularity_track_uri_date;
+drop index if exists public.idx_track_popularity_recorded_at;
+
+-- Conferir o estado final:
+--
+--   select i.indexrelname, pg_size_pretty(pg_relation_size(i.indexrelid)), i.idx_scan
+--   from pg_stat_user_indexes i
+--   where i.relname = 'track_popularity_history'
+--   order by pg_relation_size(i.indexrelid) desc;

@@ -4,9 +4,9 @@
 // Duas coisas mandam no desenho deste arquivo:
 //
 // 1. O CHART JÁ TRAZ O RANK.
-//    /chart/{genero}/tracks devolve até 100 faixas e cada uma vem com o campo
-//    `rank`. Ou seja: uma requisição mede 100 faixas. É por isso que a varredura
-//    por gênero é a espinha do job — ~30 requisições cobrem ~3.000 faixas por
+//    /chart/{genero}/tracks devolve até 300 faixas e cada uma vem com o campo
+//    `rank`. Ou seja: uma requisição mede 300 faixas. É por isso que a varredura
+//    por gênero é a espinha do job — 28 requisições cobrem ~7.700 faixas por
 //    noite. Medir uma a uma (/track/{id}) só é preciso para faixa que já está
 //    no Observatório e caiu fora do chart — é a parte que custa uma requisição
 //    por faixa, e por isso a que dita quanto tempo a rodada leva.
@@ -211,11 +211,18 @@ export async function listarGeneros(): Promise<{ id: number; name: string }[]> {
   ]
 }
 
-/** Chart de um gênero. Uma requisição, até `limite` faixas já com rank. */
+/**
+ * Chart de um gênero. Uma requisição, até `limite` faixas já com rank.
+ *
+ * O teto real do endpoint é 300, não 100 — `?limit=500` devolve 300 e a
+ * paginação por `index` confirma que a lista acaba ali (index=500 volta vazio).
+ * Medido em 15/08/2026 nos 28 gêneros: 25 devolvem 300 (chart/0 e Clássica
+ * devolvem 299, Música Indiana 280).
+ */
 export async function chartDoGenero(
   generoId: number,
   generoNome: string | null,
-  limite = 100
+  limite = 300
 ): Promise<FaixaObservada[]> {
   const res = await dz<DeezerLista<DeezerFaixa>>(
     `/chart/${generoId}/tracks?limit=${limite}`

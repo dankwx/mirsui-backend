@@ -8,7 +8,7 @@
 //
 // ORDEM DA RODADA
 //   1. Varre os charts por gênero. Barato e é o grosso: cada requisição devolve
-//      100 faixas já com rank.
+//      300 faixas já com rank.
 //   2. Traz para o Observatório as faixas que os usuários salvaram e que ainda
 //      não estavam sendo medidas. É a ponta obscura do catálogo — o chart sozinho
 //      enviesa tudo para o que já estourou, e "antes de estourar" é a tese.
@@ -40,6 +40,13 @@ interface Log {
 }
 
 export interface ResultadoObservatorio {
+  /**
+   * Linhas efetivamente gravadas no histórico. Desde a migration 021 isso conta
+   * MUDANÇAS de rank, não medições: faixa medida cujo rank não mexeu não gera
+   * linha. Esperar este número perto do tamanho do catálogo é leitura antiga —
+   * o normal agora é uma fração dele. Quantas faixas foram medidas está em
+   * doChart + doAcervo + medidasIndividuais.
+   */
   pontos: number
   doChart: number
   doAcervo: number
@@ -105,9 +112,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   const db = supabaseAdmin
 
   const maxGeneros = num('OBS_MAX_GENEROS', Infinity)
-  // Este é o único teto real que sobra, e não é nosso: 100 é o máximo que
-  // /chart/{id}/tracks devolve numa resposta.
-  const limiteChart = num('OBS_LIMITE_CHART', 100)
+  // Este é o único teto real que sobra, e não é nosso: 300 é o máximo que
+  // /chart/{id}/tracks devolve numa resposta. Ficou em 100 por muito tempo por
+  // engano — o endpoint sempre devolveu 300, pelo mesmo custo de 1 requisição.
+  const limiteChart = num('OBS_LIMITE_CHART', 300)
   const limiteAcervo = num('OBS_LIMITE_ACERVO', Infinity)
   const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
   const limiteIsrc = num('OBS_LIMITE_ISRC', Infinity)
@@ -178,7 +186,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   try {
     const generos = await listarGeneros()
     // O gênero 0 ("Todos") é o chart global e vale sempre; os demais vêm todos.
-    // Gênero é barato: uma requisição cobre até 100 faixas, e o Deezer tem
+    // Gênero é barato: uma requisição cobre até 300 faixas, e o Deezer tem
     // pouco mais de vinte deles — cortar em 40 nunca economizou nada de real.
     const alvo = [
       { id: 0, name: 'Todos' },

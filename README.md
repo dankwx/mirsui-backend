@@ -36,7 +36,8 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | `OBS_DESCOBERTA_ATIVA` | Não | Liga a descoberta diária por rádio do Deezer (padrão: `true`) |
 | `OBS_DESCOBERTA_META_INICIAL` | Não | Meta da expansão inicial do catálogo (padrão: `6604`) |
 | `OBS_LIMITE_DESCOBERTA` | Não | Novas faixas por dia depois da meta inicial (padrão: `250`) |
-| `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`) |
+| `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`). Vale só para a descoberta — faixa que entra por chart não passa por ele |
+| `OBS_LIMITE_CHART` | Não | Faixas pedidas por chart de gênero (padrão: `300`, que é o teto do endpoint). Baixar reduz a rodada e o crescimento do catálogo |
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
 
