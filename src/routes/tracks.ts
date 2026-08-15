@@ -48,12 +48,29 @@ async function resolveYouTubeVideoId(
   const videoId = await searchYouTubeVideoId(trackName, artistNames)
   if (videoId) {
     try {
-      // A escrita passa pela função SECURITY DEFINER (valida o formato dos ids).
-      const writer = supabaseAdmin ?? supabase
-      await writer.rpc('cache_youtube_video', {
-        p_spotify_id: trackId,
-        p_video_id: videoId,
-      })
+      if (supabaseAdmin) {
+        // Caminho autoritativo. A service role ignora o RLS e a tabela não tem
+        // policy de INSERT/UPDATE, então só o servidor escreve por aqui — e só
+        // por aqui dá para SOBRESCREVER. É o conserto de uma entrada errada ou
+        // envenenada (ver migrations/017_youtube_cache_sem_sobrescrita.sql).
+        await supabaseAdmin
+          .from('youtube_cache')
+          .upsert(
+            {
+              spotify_track_id: trackId,
+              youtube_video_id: videoId,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'spotify_track_id' }
+          )
+      } else {
+        // Sem service role: cai na função SECURITY DEFINER, que só preenche
+        // vazio. Nunca sobrescreve.
+        await supabase.rpc('cache_youtube_video', {
+          p_spotify_id: trackId,
+          p_video_id: videoId,
+        })
+      }
     } catch (err) {
       app.log.warn({ err }, 'Falha ao gravar youtube_cache')
     }
