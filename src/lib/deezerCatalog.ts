@@ -164,6 +164,13 @@ function extrairCoverMd5(album?: DeezerAlbum): string | null {
 export interface FaixaObservada {
   deezer_track_id: string
   deezer_artist_id: string | null
+  /**
+   * Álbum da faixa. Sempre veio nas respostas do Deezer e era descartado —
+   * guardávamos só o título e o md5 da capa. É o que permite resolver ISRC em
+   * lote por /album/{id}/tracks, ~10x mais barato que uma requisição por faixa
+   * (migration 024).
+   */
+  deezer_album_id: string | null
   isrc: string | null
   title: string
   artist_name: string
@@ -239,6 +246,7 @@ export async function chartDoGenero(
       {
         deezer_track_id: String(t.id),
         deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+        deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
         isrc: t.isrc ?? null,
         title: titulo,
         artist_name: artista,
@@ -256,6 +264,7 @@ export interface FaixaDetalhada {
   rank: number
   isrc: string | null
   deezer_artist_id: string | null
+  deezer_album_id: string | null
   title: string | null
   artist_name: string | null
   album_name: string | null
@@ -285,6 +294,7 @@ export async function buscarFaixa(deezerTrackId: string): Promise<{
       rank: t.rank,
       isrc: t.isrc ?? null,
       deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+      deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
       title: t.title || t.title_short || null,
       artist_name: t.artist?.name ?? null,
       album_name: t.album?.title ?? null,
@@ -292,6 +302,59 @@ export async function buscarFaixa(deezerTrackId: string): Promise<{
     },
     notFound: false,
   }
+}
+
+export interface FaixaDoAlbum {
+  deezer_track_id: string
+  deezer_artist_id: string | null
+  isrc: string | null
+  title: string | null
+  artist_name: string | null
+  rank: number | null
+}
+
+/**
+ * As faixas de um álbum, com ISRC e rank, numa requisição só.
+ *
+ * É a alavanca do item 5 da análise de escala (§4.2): a etapa de ISRC gastava
+ * 1 requisição por faixa em `/track/{id}` só para ler um campo. Um álbum tem
+ * 10-14 faixas, então o custo cai ~10x — e isso deixou de ser otimização
+ * quando o ISRC virou o endereço das páginas, porque é esta etapa que dá
+ * página às faixas novas.
+ *
+ * Medido em 15/08/2026: `/album/302127/tracks` devolve 14 faixas, 14 com ISRC
+ * e 14 com rank. (`/artist/{id}/top` NÃO traz ISRC — só o de álbum traz.)
+ *
+ * `falhou` distingue "o álbum não tem esta faixa" de "não consegui perguntar".
+ * A diferença é tudo para um job que grava marca de "já tentei": confundir as
+ * duas queima a faixa por causa de um erro de rede.
+ */
+export async function faixasDoAlbum(
+  deezerAlbumId: string
+): Promise<{ faixas: FaixaDoAlbum[]; falhou: boolean }> {
+  const res = await dz<DeezerLista<DeezerFaixa>>(
+    `/album/${encodeURIComponent(deezerAlbumId)}/tracks?limit=300`
+  )
+
+  if (!res || res.error || !Array.isArray(res.data)) {
+    return { faixas: [], falhou: true }
+  }
+
+  const faixas = res.data.flatMap((t) => {
+    if (t.id == null) return []
+    return [
+      {
+        deezer_track_id: String(t.id),
+        deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+        isrc: t.isrc ?? null,
+        title: t.title || t.title_short || null,
+        artist_name: t.artist?.name ?? null,
+        rank: typeof t.rank === 'number' ? t.rank : null,
+      },
+    ]
+  })
+
+  return { faixas, falhou: false }
 }
 
 /**
@@ -313,6 +376,7 @@ export async function buscarPorTexto(
   return {
     deezer_track_id: String(t.id),
     deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+    deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
     isrc: t.isrc ?? null,
     title: nomeTitulo,
     artist_name: nomeArtista,
@@ -357,6 +421,7 @@ export async function radioDoArtista(
       {
         deezer_track_id: String(t.id),
         deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+        deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
         isrc: null,
         title: titulo,
         artist_name: artista,

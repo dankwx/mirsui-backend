@@ -41,12 +41,24 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
 
+`SPOTIFY_CLIENT_ID` e `SPOTIFY_CLIENT_SECRET` são **opcionais** desde 15/08/2026.
+A fonte de metadado e de métrica é o Deezer, que não pede chave. O que o Spotify
+ainda faz é dizer qual é o id dele para uma gravação que já identificamos por
+ISRC, para o botão "ouvir no Spotify" cair na faixa exata em vez de cair numa
+busca — enriquecimento, não requisito. Ver
+[`docs/plano-independencia-do-spotify.md`](docs/plano-independencia-do-spotify.md).
+
 ### Jobs diários
 
-- **05:00 — Observatório:** atualiza charts, mede o catálogo, completa ISRC e
-  Spotify e, por último, descobre faixas semelhantes pelo rádio de artista do
-  Deezer. A primeira expansão tenta chegar a 6.604 faixas; depois cresce no
-  máximo 250 por dia, até 10 mil.
+- **05:00 — Observatório:** atualiza charts, mede o catálogo, completa o ISRC
+  (que é o endereço das páginas do site) e, por último, descobre faixas
+  semelhantes pelo rádio de artista do Deezer. A primeira expansão tenta chegar
+  a 6.604 faixas; depois cresce no máximo 250 por dia, até 10 mil.
+
+  A etapa que resolvia ISRC → id do Spotify **saiu da rodada**: eram 2.027
+  buscas por noite, era a parte que mais falhava e escalava com o tamanho do
+  catálogo. Virou resolução preguiçosa em `POST /tracks/resolve-spotify` — quem
+  abre a página de uma faixa resolve aquela faixa, uma vez, para sempre.
 - **09:00 — Stakes:** mede os stakes ativos e credita a evolução diária.
 
 A descoberta é idempotente por semente, não marca falhas transitórias como
@@ -188,12 +200,34 @@ Resposta: `200 { posts: [...], total }` — cada post inclui os dados da track, 
 
 `savers_count` conta quantas pessoas salvaram **a música** (agrupando por `track_uri`), não quantas salvaram aquela linha: cada pessoa que salva a mesma faixa cria uma linha própria em `tracks`. É o mesmo universo de `position`, então "3ª a salvar · 12 já salvaram" fecha.
 
-`saved_by_me` responde "o usuário do token já salvou esta música?", também por `track_uri`. Com token ausente ou inválido vem `false` em todos os posts — então o cliente precisa mandar o header também nas páginas seguintes do `offset`, senão as faixas já salvas voltam a aparecer como não salvas.
+`saved_by_me` responde "o usuário do token já salvou esta música?". Com token ausente ou inválido vem `false` em todos os posts — então o cliente precisa mandar o header também nas páginas seguintes do `offset`, senão as faixas já salvas voltam a aparecer como não salvas.
+
+Desde a migration 023 as duas perguntas casam por **gravação**, e não por string: `isrc` quando a linha tem, `track_uri` quando não. Sem isso, a mesma faixa salva por um caminho antigo (uri do Spotify) e por um novo (`isrc:<ISRC>`) viraria dois contadores paralelos e duas "primeiras pessoas a salvar".
 
 #### `GET /feed/recent-claims?limit=4`
 Achados recentes sem músicas duplicadas (únicos por `track_uri`). `limit`: 1–20 (padrão 4).
 
 Resposta: `200 { claims: [...] }`
+
+### Tracks — ficha e busca
+
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| GET | `/tracks/search?q=&limit=` | — | Busca faixas no **Deezer**. `200 { tracks }` — cada item traz `id` (o ISRC, que é o endereço da página), `isrc`, `deezerTrackId`, `uri`, capa, `preview` de 30 s e `popularity` 0–100 |
+| GET | `/tracks/isrc/:isrc` | opcional | Ficha completa da gravação numa chamada: faixa, gênero, fãs do artista, prévia, total de salvamentos, quem salvou e — com token — o claim do próprio usuário |
+| GET | `/tracks/spotify/:id` | opcional | A rota antiga. Traduz o id do Spotify para ISRC **consultando o banco local** e devolve a mesma ficha. `404` se a ponte não conhecer o id |
+| POST | `/tracks/resolve-spotify` | — | Body `{ "isrc": "..." }`. Descobre o id do Spotify daquela gravação e grava. `200 { spotifyTrackId }` — `null` significa "não sei agora", nunca um erro |
+
+`/tracks/resolve-spotify` é a camada 2 do "ouvir no Spotify" (§5 do plano de
+independência). É público porque a página de faixa é aberta, mas **nada vindo do
+cliente é gravado**: o corpo traz só o ISRC e quem descobre o id é o servidor.
+Se o navegador pudesse mandar o `spotify_track_id`, qualquer um apontaria o
+botão de qualquer faixa para qualquer outra — a mesma lição da migration 017 com
+o cache do YouTube.
+
+O campo `spotify_url` da ficha vem sempre preenchido: com o id exato quando ele
+existe, e com `open.spotify.com/search/<artista título>` quando não. `spotify_exact`
+diz qual dos dois é.
 
 ### Tracks — comentários
 
@@ -212,7 +246,8 @@ Reivindica uma música. Body:
 
 ```json
 {
-  "trackUri": "spotify:track:...",   // obrigatório
+  "trackUri": "spotify:track:... | isrc:...",  // obrigatório (chave opaca)
+  "isrc": "USUM72409273",             // recomendado: identifica a GRAVAÇÃO
   "trackName": "...",                 // obrigatório
   "artistName": "...",                // obrigatório
   "albumName": "...",
@@ -224,6 +259,12 @@ Reivindica uma música. Body:
 ```
 
 A `position` é a ordem de chegada do claim daquela música (1º, 2º, ...). O `discover_rating` é calculado como `100 - popularity + 100 / position`.
+
+O `isrc` não substitui o `trackUri` — ele acompanha. `track_uri` continua sendo
+a chave opaca do acervo (as linhas antigas guardam `spotify:track:<id>` e nada
+foi migrado), e `isrc` é o que faz a contagem, a deduplicação e o "você já
+salvou" enxergarem a mesma GRAVAÇÃO mesmo quando ela foi salva por caminhos
+diferentes. Ver `migrations/023_isrc_canonico.sql`.
 
 Respostas: `201 { success, message, position, youtubeUrl, data }` · `409` se o usuário já reivindicou essa música (inclui `position` e `youtubeUrl` do claim existente).
 

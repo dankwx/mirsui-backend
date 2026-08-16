@@ -33,6 +33,7 @@ export default async function feedRoutes(app: FastifyInstance) {
         position,
         claimedat,
         track_uri,
+        isrc,
         discover_rating,
         claim_message,
         youtube_url,
@@ -79,10 +80,10 @@ export default async function feedRoutes(app: FastifyInstance) {
       commentsCountByTrack[linha.track_id] = Number(linha.comments_count) || 0
     }
 
-    // "Você já salvou esta faixa?" é por track_uri, não por linha de tracks:
+    // "Você já salvou esta faixa?" é por GRAVAÇÃO, não por linha de tracks:
     // cada pessoa que salva a mesma música cria uma linha própria, então
     // perguntar pelo id do post responderia sobre o achado de outra pessoa.
-    const savedUris = await buscarUrisSalvas(request, tracks)
+    const salvas = await buscarSalvasDoUsuario(request, tracks)
 
     const posts = tracks.map((track: any) => ({
       id: track.id,
@@ -96,6 +97,7 @@ export default async function feedRoutes(app: FastifyInstance) {
       position: track.position,
       claimedat: track.claimedat,
       track_uri: track.track_uri,
+      isrc: track.isrc ?? null,
       discover_rating: track.discover_rating,
       claim_message: track.claim_message,
       youtube_url: track.youtube_url,
@@ -104,7 +106,9 @@ export default async function feedRoutes(app: FastifyInstance) {
       avatar_url: track.profiles?.avatar_url || null,
       savers_count: saversCountByTrack[track.id] || 0,
       comments_count: commentsCountByTrack[track.id] || 0,
-      saved_by_me: track.track_uri ? savedUris.has(track.track_uri) : false
+      saved_by_me:
+        (!!track.track_uri && salvas.uris.has(track.track_uri)) ||
+        (!!track.isrc && salvas.isrcs.has(track.isrc))
     }))
 
     return reply.send({ posts, total: posts.length })
@@ -119,7 +123,7 @@ export default async function feedRoutes(app: FastifyInstance) {
     // Busca um lote maior para conseguir filtrar duplicatas
     const { data, error } = await supabase
       .from('tracks')
-      .select('id, track_title, artist_name, track_thumbnail, track_url, claimedat, track_uri')
+      .select('id, track_title, artist_name, track_thumbnail, track_url, claimedat, track_uri, isrc')
       .not('claimedat', 'is', null)
       .order('claimedat', { ascending: false })
       .limit(limit * 5)
@@ -131,14 +135,19 @@ export default async function feedRoutes(app: FastifyInstance) {
 
     const uniqueTracks = new Map<string, object>()
 
+    // A chave da deduplicação é a GRAVAÇÃO: sem isso a mesma faixa salva por
+    // dois caminhos ('spotify:track:X' antes, 'isrc:Y' depois) apareceria duas
+    // vezes na mesma lista de "achados recentes".
     for (const track of data || []) {
-      if (track.track_uri && !uniqueTracks.has(track.track_uri)) {
-        uniqueTracks.set(track.track_uri, {
+      const chave = track.isrc || track.track_uri
+      if (chave && !uniqueTracks.has(chave)) {
+        uniqueTracks.set(chave, {
           id: track.id,
           track_title: track.track_title,
           artist_name: track.artist_name,
           track_thumbnail: track.track_thumbnail,
           track_url: track.track_url,
+          isrc: track.isrc ?? null,
           claimedat: track.claimedat
         })
       }
@@ -151,36 +160,52 @@ export default async function feedRoutes(app: FastifyInstance) {
   /**
    * Quais das faixas desta página o usuário logado já salvou.
    *
-   * Devolve um Set de track_uri (não de id): o vínculo é com a música, então
-   * dois achados diferentes da mesma faixa respondem igual — que é o ponto de
-   * o botão do feed ser coerente entre posts repetidos.
+   * Devolve chaves de GRAVAÇÃO (não ids de linha): o vínculo é com a música,
+   * então dois achados diferentes da mesma faixa respondem igual — que é o
+   * ponto de o botão do feed ser coerente entre posts repetidos.
+   *
+   * São dois conjuntos porque a gravação tem duas chaves convivendo: o
+   * `track_uri` opaco, que as linhas antigas guardam como 'spotify:track:<id>',
+   * e o `isrc`, que existe desde a migration 023. Perguntar só pelo uri faria o
+   * botão dizer "Salvar" numa faixa que a pessoa já salvou por outro caminho.
    *
    * Sem token, devolve vazio: visitante não salvou nada. Erro aqui também
    * devolve vazio — o feed inteiro não pode cair porque o estado do botão
    * falhou, e o pior caso é oferecer "Salvar" numa faixa já salva, que o
    * backend trata como idempotente (409 em tracks/claim).
    */
-  async function buscarUrisSalvas(
+  async function buscarSalvasDoUsuario(
     request: FastifyRequest,
-    tracks: Array<{ track_uri: string | null }>
-  ): Promise<Set<string>> {
-    const uris = [...new Set(tracks.map((t) => t.track_uri).filter((uri): uri is string => !!uri))]
-    if (uris.length === 0) return new Set()
+    tracks: Array<{ track_uri: string | null; isrc?: string | null }>
+  ): Promise<{ uris: Set<string>; isrcs: Set<string> }> {
+    const vazio = { uris: new Set<string>(), isrcs: new Set<string>() }
+
+    const uris = [...new Set(tracks.map((t) => t.track_uri).filter((v): v is string => !!v))]
+    const isrcs = [...new Set(tracks.map((t) => t.isrc).filter((v): v is string => !!v))]
+    if (uris.length === 0 && isrcs.length === 0) return vazio
 
     const user = await getOptionalUser(request)
-    if (!user) return new Set()
+    if (!user) return vazio
 
-    const { data, error } = await supabase
-      .from('tracks')
-      .select('track_uri')
-      .eq('user_id', user.id)
-      .in('track_uri', uris)
+    let query = supabase.from('tracks').select('track_uri, isrc').eq('user_id', user.id)
+
+    // Um `.or()` só: duas consultas separadas dobrariam a ida ao banco por
+    // página de feed para responder a mesma pergunta.
+    const clausulas: string[] = []
+    if (uris.length > 0) clausulas.push(`track_uri.in.(${uris.map((u) => `"${u}"`).join(',')})`)
+    if (isrcs.length > 0) clausulas.push(`isrc.in.(${isrcs.join(',')})`)
+    query = query.or(clausulas.join(','))
+
+    const { data, error } = await query
 
     if (error) {
       app.log.error({ err: error, userId: user.id }, 'Erro ao buscar faixas salvas pelo usuário')
-      return new Set()
+      return vazio
     }
 
-    return new Set((data || []).map((row) => row.track_uri).filter((uri): uri is string => !!uri))
+    return {
+      uris: new Set((data || []).map((r) => r.track_uri).filter((v): v is string => !!v)),
+      isrcs: new Set((data || []).map((r) => r.isrc).filter((v): v is string => !!v)),
+    }
   }
 }

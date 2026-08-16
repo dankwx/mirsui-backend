@@ -16,6 +16,20 @@
 //      do menos recentemente medido para o mais recente. É o passo que faz o
 //      Observatório continuar seguindo uma faixa depois que ela sai do chart —
 //      inclusive na descida.
+//   4. Preenche o ISRC de quem entrou sem ele. Esta etapa deixou de ser
+//      acessória: o ISRC é o ENDEREÇO das páginas desde a migration 023, então
+//      é ela que dá página às faixas novas. Vai por /album/{id}/tracks, que
+//      resolve o álbum inteiro numa requisição (~10x mais barato).
+//
+// O QUE SAIU DAQUI
+// Havia uma quinta etapa que resolvia ISRC -> id do Spotify, 2.027 buscas por
+// noite. Ela era a única parte da rodada que dependia de credencial de
+// terceiro, era a que mais falhava (429 com Retry-After de horas) e escalava
+// com o TAMANHO DO CATÁLOGO em vez de com interesse. Virou resolução
+// preguiçosa: quem abre a página resolve aquela faixa, uma vez, para sempre
+// (POST /tracks/resolve-spotify). O `spotify_track_id` continua na tabela e
+// continua sendo preenchido — só que por visita, não por varredura.
+// Ver docs/plano-independencia-do-spotify.md, fases 4 e 5.
 //
 // Nada aqui é obrigatório para o job ser útil: se um passo falhar, os outros
 // gravam mesmo assim. Um dia com metade dos pontos vale muito mais que um dia
@@ -23,13 +37,13 @@
 
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
-import { findSpotifyIdByIsrc } from '../lib/spotify'
 import { runCatalogDiscovery } from './catalogDiscovery'
 import {
   listarGeneros,
   chartDoGenero,
   buscarFaixa,
   buscarPorTexto,
+  faixasDoAlbum,
   type FaixaObservada,
 } from '../lib/deezerCatalog'
 
@@ -52,10 +66,12 @@ export interface ResultadoObservatorio {
   doAcervo: number
   medidasIndividuais: number
   isrcPreenchidos: number
-  spotifyResolvidos: number
-  spotifyNaoAchados: number
-  /** requisições que falharam (429, rede): voltam à fila amanhã */
-  spotifyFalhasTransitorias: number
+  /** requisições a /album/{id}/tracks — cada uma cobre o álbum inteiro */
+  isrcRequisicoesDeAlbum: number
+  /** faixas cujo ISRC saiu de um álbum, e não de uma requisição própria */
+  isrcResolvidosPorAlbum: number
+  /** faixas que precisaram do caminho antigo, uma requisição cada */
+  isrcResolvidosUmAUm: number
   descobertaSementes: number
   descobertaNovas: number
   descobertaSemCandidata: number
@@ -94,9 +110,9 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     doAcervo: 0,
     medidasIndividuais: 0,
     isrcPreenchidos: 0,
-    spotifyResolvidos: 0,
-    spotifyNaoAchados: 0,
-    spotifyFalhasTransitorias: 0,
+    isrcRequisicoesDeAlbum: 0,
+    isrcResolvidosPorAlbum: 0,
+    isrcResolvidosUmAUm: 0,
     descobertaSementes: 0,
     descobertaNovas: 0,
     descobertaSemCandidata: 0,
@@ -119,7 +135,6 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   const limiteAcervo = num('OBS_LIMITE_ACERVO', Infinity)
   const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
   const limiteIsrc = num('OBS_LIMITE_ISRC', Infinity)
-  const limiteSpotify = num('OBS_LIMITE_SPOTIFY', Infinity)
 
   const resultado = { ...vazio }
   const inicio = Date.now()
@@ -297,6 +312,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   interface LinhaObservada {
     deezer_track_id: string
     deezer_artist_id: string | null
+    deezer_album_id: string | null
     title: string
     artist_name: string
     source_list: string | null
@@ -343,6 +359,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       medidas.push({
         deezer_track_id: r.deezer_track_id,
         deezer_artist_id: faixa.deezer_artist_id ?? r.deezer_artist_id,
+        deezer_album_id: faixa.deezer_album_id ?? r.deezer_album_id,
         isrc: faixa.isrc,
         title: faixa.title ?? r.title,
         artist_name: faixa.artist_name ?? r.artist_name,
@@ -401,7 +418,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       () =>
         db
           .from('observed_tracks')
-          .select('deezer_track_id, deezer_artist_id, title, artist_name, source_list')
+          .select('deezer_track_id, deezer_artist_id, deezer_album_id, title, artist_name, source_list')
           .eq('active', true)
           .or(`last_checked_at.is.null,last_checked_at.lt.${hojeISO}`)
           .order('last_checked_at', { ascending: true, nullsFirst: true }),
@@ -426,17 +443,27 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   }
 
   // -------------------------------------------------------------------------
-  // 4. ISRC pendente — a ponte para o Spotify
+  // 4. ISRC pendente — o identificador das páginas
   // -------------------------------------------------------------------------
-  // Faixa que entra por chart nasce sem ISRC, e sem ISRC a página
-  // /track/[spotifyId] não consegue achar a curva dela. Esta etapa fecha isso.
-  // A fila é "nunca tentei" e não "está sem ISRC": ver migrations/010.
+  // Faixa que entra por chart nasce sem ISRC (o chart não traz esse campo), e
+  // sem ISRC ela não tem página: /track/[id] é endereçado pelo ISRC desde a
+  // migration 023. Esta etapa deixou de ser um passo intermediário para a ponte
+  // do Spotify e virou o que dá página às faixas novas.
+  //
+  // O caminho principal é /album/{id}/tracks: uma requisição devolve o álbum
+  // inteiro com ISRC e rank em todas as faixas (medido: 14/14 nos dois campos).
+  // A 10-14 faixas por álbum, isso é ~10x mais barato que /track/{id} um a um,
+  // que continua existindo para quem ainda não tem álbum conhecido.
+  //
+  // A fila é "nunca tentei" e não "está sem ISRC": ver migrations/010. Sem essa
+  // distinção, faixa que o Deezer não tem ISRC voltaria para a fila todas as
+  // noites, para sempre, travando o avanço.
   try {
     const pendentes = await lerFila<LinhaObservada>(
       () =>
         db
           .from('observed_tracks')
-          .select('deezer_track_id, deezer_artist_id, title, artist_name, source_list')
+          .select('deezer_track_id, deezer_artist_id, deezer_album_id, title, artist_name, source_list')
           .eq('active', true)
           .is('isrc', null)
           .is('isrc_checked_at', null)
@@ -446,13 +473,102 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
 
     let consultadas = 0
 
-    await processarEmBlocos(pendentes, async ({ medidas, sumiram, tentados }) => {
-      resultado.pontos += await gravar(medidas, 'isrc')
-      resultado.isrcPreenchidos += medidas.filter((m) => m.isrc != null).length
-      await desativar(sumiram)
+    // Agrupa por álbum. As que não têm álbum conhecido — e as que o álbum não
+    // souber responder — caem no caminho de uma requisição por faixa.
+    const porAlbum = new Map<string, LinhaObservada[]>()
+    const umAUm: LinhaObservada[] = []
+    for (const r of pendentes) {
+      if (r.deezer_album_id) {
+        const lista = porAlbum.get(r.deezer_album_id)
+        if (lista) lista.push(r)
+        else porAlbum.set(r.deezer_album_id, [r])
+      } else {
+        umAUm.push(r)
+      }
+    }
+
+    const albuns = [...porAlbum.entries()]
+    // Mesmo tamanho de bloco das outras etapas: o progresso precisa ser
+    // durável, e quem controla o ritmo é a fila de deezerCatalog.ts.
+    const BLOCO_ALBUM = 100
+
+    for (let i = 0; i < albuns.length; i += BLOCO_ALBUM) {
+      const bloco = albuns.slice(i, i + BLOCO_ALBUM)
+
+      const respostas = await Promise.all(
+        bloco.map(async ([albumId, linhas]) => ({
+          linhas,
+          ...(await faixasDoAlbum(albumId)),
+        }))
+      )
+      resultado.isrcRequisicoesDeAlbum += bloco.length
+
+      const medidas: FaixaObservada[] = []
+      const tentados: string[] = []
+
+      for (const { linhas, faixas, falhou } of respostas) {
+        // Rede, quota ou resposta inválida: não marca nada, tenta amanhã.
+        // Marcar aqui queimaria o álbum inteiro por causa de um erro passageiro.
+        if (falhou) continue
+
+        const doAlbum = new Map(faixas.map((f) => [f.deezer_track_id, f]))
+
+        for (const r of linhas) {
+          // Já medida na etapa 3 desta rodada: aquele caminho traz ISRC junto,
+          // então não há o que fazer aqui.
+          if (consultadasNestaRodada.has(r.deezer_track_id)) continue
+
+          const f = doAlbum.get(r.deezer_track_id)
+          // O álbum respondeu mas não lista esta faixa (id de catálogo
+          // regional, álbum trocado): volta para o caminho de uma requisição
+          // por faixa, em vez de virar uma marca de "tentei" mentirosa.
+          if (!f || f.rank == null) {
+            umAUm.push(r)
+            continue
+          }
+
+          consultadasNestaRodada.add(r.deezer_track_id)
+          tentados.push(r.deezer_track_id)
+          medidas.push({
+            deezer_track_id: r.deezer_track_id,
+            deezer_artist_id: f.deezer_artist_id ?? r.deezer_artist_id,
+            deezer_album_id: r.deezer_album_id,
+            isrc: f.isrc,
+            title: f.title ?? r.title,
+            artist_name: f.artist_name ?? r.artist_name,
+            // O endpoint de álbum não repete capa nem álbum em cada faixa, e
+            // record_observations preserva o que já está gravado.
+            album_name: null,
+            cover_md5: null,
+            genre: null,
+            source_list: r.source_list ?? 'chart:0',
+            rank: f.rank,
+          })
+        }
+      }
+
+      resultado.pontos += await gravar(medidas, 'isrc-album')
+      const comIsrc = medidas.filter((m) => m.isrc != null).length
+      resultado.isrcPreenchidos += comIsrc
+      resultado.isrcResolvidosPorAlbum += comIsrc
 
       // Marca TODOS os consultados, inclusive os que não têm ISRC no Deezer —
       // é isso que os tira da fila e deixa o resto andar.
+      if (tentados.length > 0) {
+        consultadas += tentados.length
+        const { error: errMarca } = await db.rpc('mark_isrc_checked', { p_ids: tentados })
+        if (errMarca) log.error({ err: errMarca }, 'Falha ao marcar tentativa de ISRC (álbum)')
+      }
+    }
+
+    // O resto, pelo caminho antigo: uma requisição por faixa.
+    await processarEmBlocos(umAUm, async ({ medidas, sumiram, tentados }) => {
+      resultado.pontos += await gravar(medidas, 'isrc')
+      const comIsrc = medidas.filter((m) => m.isrc != null).length
+      resultado.isrcPreenchidos += comIsrc
+      resultado.isrcResolvidosUmAUm += comIsrc
+      await desativar(sumiram)
+
       if (tentados.length > 0) {
         consultadas += tentados.length
         const { error: errMarca } = await db.rpc('mark_isrc_checked', { p_ids: tentados })
@@ -461,8 +577,15 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     })
 
     log.info(
-      { consultadas, comIsrc: resultado.isrcPreenchidos },
-      'Observatório: ponte de ISRC atualizada'
+      {
+        naFila: pendentes.length,
+        consultadas,
+        comIsrc: resultado.isrcPreenchidos,
+        requisicoesDeAlbum: resultado.isrcRequisicoesDeAlbum,
+        porAlbum: resultado.isrcResolvidosPorAlbum,
+        umAUm: resultado.isrcResolvidosUmAUm,
+      },
+      'Observatório: ISRC preenchido'
     )
   } catch (err) {
     resultado.falhas++
@@ -470,89 +593,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   }
 
   // -------------------------------------------------------------------------
-  // 5. ISRC → id do Spotify: a ponte até as páginas do site
-  // -------------------------------------------------------------------------
-  // /track/[spotifyId] renderiza qualquer faixa válida, tenha ou não salvamento.
-  // O que faltava era o identificador: sem ele, a Pilha não tinha para onde
-  // apontar e as 2.602 faixas medidas ficavam órfãs. Ver migrations/014.
-  //
-  // A busca vai com market=BR (src/lib/spotify.ts), então faixa indisponível no
-  // Brasil não resolve — de propósito: não adianta linkar o que o visitante
-  // daqui não consegue tocar.
-  try {
-    const pendentes = await lerFila<{ deezer_track_id: string; isrc: string }>(
-      () =>
-        db
-          .from('observed_tracks')
-          .select('deezer_track_id, isrc')
-          .eq('active', true)
-          .not('isrc', 'is', null)
-          .is('spotify_track_id', null)
-          .is('spotify_checked_at', null)
-          .order('added_at', { ascending: true }),
-      limiteSpotify
-    )
-
-    const BLOCO_SPOTIFY = 100
-
-    for (let i = 0; i < pendentes.length; i += BLOCO_SPOTIFY) {
-      const bloco = pendentes.slice(i, i + BLOCO_SPOTIFY)
-      const linhas: { deezer_track_id: string; spotify_track_id: string | null }[] = []
-
-      for (const p of bloco) {
-        // O filtro `isrc:` devolve a gravação exata — casamento por
-        // identificador, não por texto.
-        const { id, falhou } = await findSpotifyIdByIsrc(p.isrc)
-
-        // Falha transitória não vira registro: se gravássemos, a faixa levaria
-        // a marca de "já tentei" e nunca mais voltaria à fila por causa de um
-        // 429. Fica de fora do lote e o job pega amanhã.
-        if (falhou) {
-          resultado.spotifyFalhasTransitorias++
-          continue
-        }
-
-        linhas.push({ deezer_track_id: p.deezer_track_id, spotify_track_id: id })
-        if (id) resultado.spotifyResolvidos++
-        else resultado.spotifyNaoAchados++
-
-        // Espaçamento leve: o teto do Spotify é uma janela deslizante e não um
-        // número publicado, então o barato é não chegar perto dele.
-        await new Promise((r) => setTimeout(r, 120))
-      }
-
-      if (linhas.length === 0) continue
-
-      // Marca TODOS os consultados, inclusive os sem resultado: é o que os tira
-      // da fila e deixa o resto andar.
-      const { error: errGravar } = await db.rpc('record_spotify_ids', {
-        p_rows: linhas,
-      })
-      if (errGravar) {
-        resultado.falhas++
-        log.error({ err: errGravar }, 'Falha ao gravar ids do Spotify')
-      }
-    }
-
-    log.info(
-      {
-        consultadas: pendentes.length,
-        resolvidas: resultado.spotifyResolvidos,
-        semResultado: resultado.spotifyNaoAchados,
-        falhasTransitorias: resultado.spotifyFalhasTransitorias,
-      },
-      'Observatório: ponte para o Spotify atualizada'
-    )
-  } catch (err) {
-    resultado.falhas++
-    log.error({ err }, 'Observatório: etapa do Spotify falhou')
-  }
-
-  // -------------------------------------------------------------------------
-  // 6. Descoberta controlada de faixas semelhantes
+  // 5. Descoberta controlada de faixas semelhantes
   // -------------------------------------------------------------------------
   // Vem por último para que as faixas descobertas hoje só entrem nas filas de
-  // medição individual, ISRC e Spotify amanhã. Assim a expansão inicial não
+  // medição individual e de ISRC amanhã. Assim a expansão inicial não
   // multiplica, na mesma rodada, todas as chamadas mais caras do job.
   try {
     const descoberta = await runCatalogDiscovery(log)

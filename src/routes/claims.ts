@@ -2,11 +2,34 @@ import type { FastifyInstance } from 'fastify'
 import { supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
 
+const ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/
+
+/**
+ * O filtro que identifica uma GRAVAÇÃO, e não uma string.
+ *
+ * `track_uri` é uma chave opaca e continua sendo: as linhas antigas guardam
+ * `spotify:track:<id>` e migrá-las seria risco alto no único dado
+ * insubstituível do produto (ver docs/plano-independencia-do-spotify.md §7).
+ * O que existe agora é `tracks.isrc` ao lado — preenchida no save e
+ * retroativamente pela ponte do Observatório (migration 023).
+ *
+ * Com as duas, a mesma faixa salva por caminhos diferentes (uri do Spotify
+ * antes, `isrc:<ISRC>` depois) conta no mesmo lugar, em vez de virar dois
+ * contadores paralelos e duas "primeiras pessoas a salvar".
+ *
+ * Nem o ISRC ([A-Z0-9]{12}) nem as duas formas de uri têm vírgula, então nada
+ * aqui precisa de escape para a sintaxe do `.or()` do PostgREST.
+ */
+function filtroDaGravacao(trackUri: string, isrc: string | null): string {
+  return isrc ? `isrc.eq.${isrc},track_uri.eq.${trackUri}` : `track_uri.eq.${trackUri}`
+}
+
 export default async function claimRoutes(app: FastifyInstance) {
   // Reivindicar uma música
   app.post<{
     Body: {
       trackUri: string
+      isrc?: string | null
       trackName: string
       artistName: string
       albumName: string
@@ -32,15 +55,20 @@ export default async function claimRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Dados da música são obrigatórios' })
     }
 
+    const isrcBruto = String(request.body?.isrc ?? '').trim().toUpperCase()
+    const isrc = ISRC_RE.test(isrcBruto) ? isrcBruto : null
+    const filtro = filtroDaGravacao(trackUri, isrc)
+
     const userId = request.user.id
     const supabase = supabaseForUser(request.accessToken)
 
-    // Verificar se o usuário já reivindicou esta música
+    // Verificar se o usuário já reivindicou esta GRAVAÇÃO
     const { data: existingClaim, error: existingError } = await supabase
       .from('tracks')
       .select('id, position, youtube_url')
       .eq('user_id', userId)
-      .eq('track_uri', trackUri)
+      .or(filtro)
+      .limit(1)
       .maybeSingle()
 
     if (existingError) {
@@ -56,11 +84,11 @@ export default async function claimRoutes(app: FastifyInstance) {
       })
     }
 
-    // Posição = quantidade de claims já existentes + 1
+    // Posição = quantidade de claims já existentes + 1, por gravação
     const { count: trackCount, error: countError } = await supabase
       .from('tracks')
       .select('*', { count: 'exact', head: true })
-      .eq('track_uri', trackUri)
+      .or(filtro)
 
     if (countError) {
       app.log.error({ err: countError }, 'Erro ao contar claims')
@@ -74,6 +102,7 @@ export default async function claimRoutes(app: FastifyInstance) {
     const insertData: Record<string, unknown> = {
       track_url: spotifyUrl,
       track_uri: trackUri,
+      isrc,
       track_title: trackName,
       artist_name: artistName,
       album_name: albumName,
@@ -113,7 +142,7 @@ export default async function claimRoutes(app: FastifyInstance) {
 
   // Verificar status de claim de uma música
   app.get<{
-    Querystring: { trackUri: string }
+    Querystring: { trackUri: string; isrc?: string }
   }>('/tracks/claim/status', { preHandler: requireAuth }, async (request, reply) => {
     const { trackUri } = request.query
 
@@ -121,12 +150,16 @@ export default async function claimRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'trackUri é obrigatório' })
     }
 
+    const isrcBruto = String(request.query.isrc ?? '').trim().toUpperCase()
+    const isrc = ISRC_RE.test(isrcBruto) ? isrcBruto : null
+
     const supabase = supabaseForUser(request.accessToken)
     const { data: claim, error } = await supabase
       .from('tracks')
       .select('position, youtube_url')
       .eq('user_id', request.user.id)
-      .eq('track_uri', trackUri)
+      .or(filtroDaGravacao(trackUri, isrc))
+      .limit(1)
       .maybeSingle()
 
     if (error) {
