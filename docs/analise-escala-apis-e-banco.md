@@ -1,11 +1,15 @@
 # Análise de escala — limites de API e crescimento do banco
 
 - **Data:** 15 de agosto de 2026
-- **Status:** item 1 aplicado no código e freado no ambiente (ver 4.1 e 9);
-  itens 2 e 3 aplicados em produção (migrations 020, 021 e 022). A
-  `track_popularity_history` saiu de 5.632 kB / 21.027 linhas para
-  **1.528 kB / 7.707 linhas (−72,9%)**, com a saída das funções de leitura
-  inalterada byte a byte. O resto ainda é análise
+- **Status** (marcação revista em 16/08/2026): **itens 2, 3, 5 e 9 aplicados em
+  produção**; item 1 aplicado no código e freado no ambiente (ver 4.1 e 9);
+  **pendentes 4, 6, 7 e 8**. A `track_popularity_history` saiu de 5.632 kB /
+  21.027 linhas para **1.528 kB / 7.707 linhas (−72,9%)** (migrations 020, 021 e
+  022), com a saída das funções de leitura inalterada byte a byte. Os itens 5 e 9
+  entraram junto, pelo
+  [plano de independência do Spotify](plano-independencia-do-spotify.md)
+  (migrations 023 e 024): o Observatório inteiro passou a ter página, de 1.388
+  para 6.490 faixas
 - **Escopo:** job do Observatório (`src/jobs/catalogSnapshot.ts`), descoberta
   (`src/jobs/catalogDiscovery.ts`), clientes Deezer/Spotify e a tabela
   `track_popularity_history`
@@ -544,6 +548,13 @@ produto, não risco de cota.
 
 ### O problema concreto disso hoje
 
+> **Resolvido em 15/08/2026** — esta seção é o que originou o **item 9**, e ele
+> saiu do papel pelo
+> [plano de independência do Spotify](plano-independencia-do-spotify.md)
+> (migrations 023 e 024). O texto abaixo fica como estava escrito: é o
+> diagnóstico que motivou a troca, e vale mais intacto que corrigido depois do
+> fato. O que mudou está logo em seguida.
+
 As páginas são endereçadas por `/track/[spotifyId]`, e `findSpotifyIdByIsrc`
 busca com `market=BR`. Resultado medido:
 
@@ -560,6 +571,30 @@ Para a ambição de "qualquer música que exista", o identificador canônico do
 Mirsui deveria ser o **ISRC**, com o id do Spotify sendo enriquecimento
 opcional. É um refactor grande, mas quanto mais tarde, pior — cada dia de
 conteúdo e link indexado aumenta o custo da troca.
+
+#### Onde isso ficou (conferido no banco em 16/08/2026)
+
+O endereço da página deixou de ser `/track/[spotifyId]` e passou a ser o ISRC,
+com id do Spotify e id do Deezer redirecionando por consulta local. O funil do
+`market=BR` saiu da frente de dado que já era nosso:
+
+```
+                        antes    depois
+faixas ativas            6.490     6.490
+com ISRC                 3.425     6.490   <- fila zerada, 0 falhas do Deezer
+com página no site       1.388     6.490   <- 4,67x
+com spotify_track_id     1.388     1.388   <- virou enriquecimento opcional
+```
+
+O `spotify_track_id` continua sendo gravado, mas **por visita**
+(`POST /tracks/resolve-spotify`) e não por varredura: a etapa 5 do job — 2.027
+buscas no Spotify por noite — deixou de existir. `SPOTIFY_CLIENT_ID` e
+`SPOTIFY_CLIENT_SECRET` são opcionais desde então, e o site sobe inteiro sem
+elas. As fases, o teste de aceitação e o que ficou de fora estão no
+[plano](plano-independencia-do-spotify.md).
+
+O risco que esta seção nomeia — descontinuação, não cota — continua valendo, só
+que agora ele não derruba mais nada: o Spotify saiu do caminho de render.
 
 ---
 
@@ -591,11 +626,11 @@ mediu naquele dia, ou aquele ponto não existe*. Dizer "observando desde
 | 2 | ~~Dropar os índices redundantes~~ **feito (020)** | 2 linhas SQL | −39,3% de índice; 274 → 201 B/linha |
 | 3 | ~~Gravar só quando o rank muda~~ **feito (021 + 022)** | médio | −63,3% nas linhas de hoje, tendendo a −92%; tabela −72,9% |
 | 4 | Cadência adaptativa por orçamento fixo | alto | **o que realmente destrava a escala** |
-| 5 | ISRC via `/album/{id}/tracks` em vez de `/track/{id}` | médio | ~10x na etapa 4 |
+| 5 | ~~ISRC via `/album/{id}/tracks` em vez de `/track/{id}`~~ **feito (024), ainda não medido** | médio | ~10x na etapa 4 — o ganho aparece na próxima fila (ver nota) |
 | 6 | Medição em lote via `/artist/{id}/top` | alto | ~5x em catálogo grande |
 | 7 | Reconsiderar `OBS_MAX_CATALOGO = 10.000` | 1 env | destrava crescimento |
 | 8 | Playlists editoriais como fonte de descoberta | médio | descoberta ~100x mais barata |
-| 9 | ISRC como identificador canônico (em vez de spotify_id) | alto | tira o risco estrutural do Spotify |
+| 9 | ~~ISRC como identificador canônico (em vez de spotify_id)~~ **feito (023)** | alto | tirou o risco estrutural do Spotify; 1.388 → 6.490 páginas (4,67x) |
 
 Item 2 vale a pena mesmo que nada mais seja feito. Item 1 está aplicado no
 código mas **freado no ambiente**: ele expande o catálogo em 66%, e isso só é
@@ -603,7 +638,22 @@ barato depois do item 3 (ver a correção na seção 4.1). Item 4 é o único qu
 a natureza do problema de O(N) para O(1) — os outros compram tempo, esse compra
 escala.
 
-**Ordem revisada de execução:** 2 → 3 → soltar o freio do 1 → 4.
+**Os itens 5 e 9 entraram juntos, e não por esta ordem** — vieram a reboque do
+[plano de independência do Spotify](plano-independencia-do-spotify.md), porque o
+item 9 deixou de ser dívida técnica e virou incidente: as páginas de faixa
+estavam renderizando em branco por causa de um 429. O item 5 foi junto porque a
+etapa 4 saiu de "passo intermediário para a ponte do Spotify" e virou o que dá
+página às faixas novas.
+
+**Ressalva no item 5:** ele está no código (`faixasDoAlbum` em
+`src/lib/deezerCatalog.ts`, usada pela etapa 4 de `catalogSnapshot.ts`, que
+agrupa a fila por álbum) mas **ainda não rendeu o ~10x**. Quando a fila de 3.065
+drenou, `observed_tracks.deezer_album_id` acabava de ser criada e estava vazia —
+tudo passou pelo caminho antigo, uma requisição por faixa. Hoje a coluna tem
+3.075 faixas preenchidas e a fila está em 0: o ganho aparece na próxima fila, e
+por isso a linha da tabela diz "feito, ainda não medido".
+
+**Ordem revisada de execução:** 2 → 3 → ~~9~~ → ~~5~~ → soltar o freio do 1 → 4.
 
 ---
 

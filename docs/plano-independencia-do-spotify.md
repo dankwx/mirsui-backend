@@ -13,7 +13,9 @@
   [`analise-escala-apis-e-banco.md`](analise-escala-apis-e-banco.md) §9 — "ISRC
   como identificador canônico (em vez de spotify_id)", que lá está sem prazo e
   marcado como esforço alto. A partir daqui ele tem plano, fases e teste de
-  aceitação. Aquele documento **não foi alterado**: a marcação mora só aqui
+  aceitação. Aquele documento ficou **intacto no dia da execução**; em 16/08/2026
+  recebeu só a marcação de status — itens 9 e 5 como feitos na tabela §9, e um
+  ponteiro para cá em §7. O raciocínio dele continua como estava escrito
 
 Este documento continua a seção 7 de
 [`analise-escala-apis-e-banco.md`](analise-escala-apis-e-banco.md), que já tinha
