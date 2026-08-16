@@ -112,6 +112,14 @@ export interface ResultadoObservatorio {
   descobertaNovas: number
   descobertaSemCandidata: number
   descobertaFalhasApi: number
+  /** faixas novas vindas da caminhada por álbum (ADR 002), já com ISRC */
+  descobertaNovasPorAlbum: number
+  /** faixas que a caminhada leu; a diferença para as novas já estava no catálogo */
+  descobertaColhidasPorAlbum: number
+  /** requisições gastas na caminhada — a razão com as colhidas é o que se mede */
+  descobertaRequisicoesDeAlbum: number
+  /** artistas na fronteira da caminhada antes desta rodada */
+  descobertaFronteira: number
   desativadas: number
   falhas: number
 }
@@ -159,6 +167,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     descobertaNovas: 0,
     descobertaSemCandidata: 0,
     descobertaFalhasApi: 0,
+    descobertaNovasPorAlbum: 0,
+    descobertaColhidasPorAlbum: 0,
+    descobertaRequisicoesDeAlbum: 0,
+    descobertaFronteira: 0,
     desativadas: 0,
     falhas: 0,
   }
@@ -750,6 +762,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     resultado.descobertaNovas = descoberta.novas
     resultado.descobertaSemCandidata = descoberta.semCandidata
     resultado.descobertaFalhasApi = descoberta.falhasApi
+    resultado.descobertaNovasPorAlbum = descoberta.albumNovas
+    resultado.descobertaColhidasPorAlbum = descoberta.albumFaixasColhidas
+    resultado.descobertaRequisicoesDeAlbum = descoberta.albumRequisicoes
+    resultado.descobertaFronteira = descoberta.fronteiraAntes
     resultado.pontos += descoberta.pontos
   } catch (err) {
     resultado.falhas++

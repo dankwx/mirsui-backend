@@ -33,11 +33,16 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | `SUPABASE_SERVICE_ROLE_KEY` | Sim em produção | Chave privada usada exclusivamente pelos jobs do Observatório e dos Stakes; nunca vai para o frontend |
 | `FRONTEND_URL` | Não | Origem extra permitida no CORS e destino padrão do link de reset de senha |
 | `PORT` | Não | Porta do servidor (padrão: `3000`) |
-| `OBS_DESCOBERTA_ATIVA` | Não | Liga a descoberta diária por rádio do Deezer (padrão: `true`) |
+| `OBS_DESCOBERTA_ATIVA` | Não | Liga a descoberta diária (padrão: `true`) |
 | `OBS_DESCOBERTA_META_INICIAL` | Não | Meta da expansão inicial do catálogo (padrão: `6604`) |
 | `OBS_LIMITE_DESCOBERTA` | Não | Novas faixas por dia depois da meta inicial (padrão: `250`) |
 | `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`). Vale só para a descoberta — faixa que entra por chart não passa por ele |
 | `OBS_LIMITE_CHART` | Não | Faixas pedidas por chart de gênero (padrão: `300`, que é o teto do endpoint). Baixar reduz a rodada e o crescimento do catálogo |
+| `OBS_DESCOBERTA_SPLIT_ALBUM` | Não | Fração do orçamento da descoberta que vai para a caminhada por álbum (padrão: `0.7`). `0` volta ao comportamento só-rádio do ADR 001 |
+| `OBS_DESCOBERTA_MAX_FAS` | Não | Teto de fãs para um artista entrar na fronteira da caminhada (padrão: `50000`). É o dial de obscuridade |
+| `OBS_DESCOBERTA_RELACIONADOS` | Não | Artistas que cada semente contribui à fronteira (padrão: `3`) |
+| `OBS_DESCOBERTA_FRONTEIRA_MIN` | Não | Abaixo disto a fronteira é reabastecida com sementes do catálogo (padrão: `50`) |
+| `OBS_DESCOBERTA_ALBUNS_POR_ARTISTA` | Não | Álbuns colhidos por artista por noite (padrão: `6`) |
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
 

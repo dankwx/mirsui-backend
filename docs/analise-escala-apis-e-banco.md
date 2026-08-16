@@ -1,9 +1,12 @@
 # Análise de escala — limites de API e crescimento do banco
 
 - **Data:** 15 de agosto de 2026
-- **Status** (marcação revista em 16/08/2026): **itens 2, 3, 4, 5 e 9 aplicados
-  em produção**; item 1 aplicado no código e freado no ambiente (ver 4.1 e 9);
-  **pendentes 6, 7 e 8**. O item 4 entrou pela migration 025 e é o que troca
+- **Status** (marcação revista em 16/08/2026, segunda revisão): **itens 2, 3, 4,
+  5 e 9 aplicados em produção**; **itens 1 e 6 descartados** por medição, não por
+  esforço (ver 4.6 e a revisão na seção 9); **item 7 é uma decisão com prazo —
+  início de setembro de 2026**; **item 8 virou a descoberta por álbum**
+  ([ADR 002](decisions/002-descoberta-por-album.md), migration 026 escrita e
+  pendente de aplicação). O item 4 entrou pela migration 025 e é o que troca
   O(N) por orçamento fixo — mas ele **não economiza nada ainda**, porque o
   catálogo inteiro tem menos de 30 dias e é 100% quente (ver 5.1). A
   `track_popularity_history` saiu de 5.632 kB /
@@ -274,10 +277,15 @@ permanente a etapa 3 vai de 3.929 para ~7.400 req/noite, e o histórico passa a
 gravar 10.795 linhas/dia em vez de 6.490 — acelerando em 66% exatamente o
 gargalo que a seção 2.2 identifica como o problema real.
 
-Há ainda um efeito silencioso: `calcularOrcamentoDescoberta` devolve `0` quando
-`catalogoAtivo >= maxCatalogo` (`src/jobs/catalogDiscovery.ts:91`). Com o
-catálogo em 10.795, **a descoberta do ADR 001 se desliga sozinha a partir da
-noite 2**, e nenhum log diz o porquê.
+Há ainda um efeito de borda: `calcularOrcamentoDescoberta` devolve `0` quando
+`catalogoAtivo >= maxCatalogo` (`src/jobs/catalogDiscovery.ts`). Com o catálogo
+em 10.795, **a descoberta do ADR 001 se desliga sozinha a partir da noite 2**.
+
+> **Correção (16/08/2026):** a primeira versão desta seção dizia que "nenhum log
+> diz o porquê". **Está errado.** `catalogDiscovery.ts:179` loga
+> `'Descoberta: teto do catálogo atingido'` com `catalogoAtivo` e `maxCatalogo`,
+> e faz isso desde o commit que criou a descoberta. O desligamento é visível; o
+> que ele não é, é *decidido* — ver a revisão do item 7 na seção 9.
 
 #### O que a mudança realmente é
 
@@ -358,6 +366,97 @@ headers relevantes: access-control-max-age, x-content-type-options, x-host, x-or
 Ou seja: não há como descobrir a cota restante a não ser levando o erro `code: 4`
 ("Quota limit exceeded"), que é o que `deezerCatalog.ts` já trata. O tratamento
 atual (frear a fila inteira, não só a chamada que falhou) está correto.
+
+### 4.6 A descoberta traz o que já é popular — e sem ISRC
+
+> **Medido em 16/08/2026.** Esta seção não estava na análise original: ela nasceu
+> da pergunta "dá para pegar 1.000 faixas obscuras por dia?", e a resposta mudou
+> o desenho da descoberta. Ver [ADR 002](decisions/002-descoberta-por-album.md) e
+> a migration 026.
+
+O item 8 (§4.4) supunha que o problema da descoberta era **preço**. Medindo, o
+problema é **mira**. A/B com as mesmas cinco sementes nos dois caminhos:
+
+```
+                       ATUAL (radio)      PROPOSTO (related→album)
+requisições          : 5                  20
+faixas colhidas      : 15                 93
+faixas/requisição    : 3.00               4.65
+ISRC                 : 0/15               93/93
+rank mediana         : 447.301            38.978
+rank p10 / p90       : 155.538 / 607.033  7.803 / 144.526
+```
+
+Com a régua do chart ao lado:
+
+| Fonte | rank mediana |
+|---|---|
+| `chart/0` top 100 | 865.789 |
+| `chart/132` posições 200–300 | 795.974 |
+| `radio` — o que a descoberta traz hoje | 447.301 |
+| `related → album` | 38.978 |
+
+**Duas leituras importam aqui.**
+
+A primeira mata o item 1 de vez: as posições 200–300 do chart têm rank mediano
+795.974 contra 865.789 do top 100. A "cauda" do chart é 92% tão popular quanto o
+topo — **não é cauda nenhuma**. O item 1 expandiria o catálogo em 66% com material
+que já estourou, e a §8 deste documento diz que o custo deve escalar com
+*interesse*, não com catálogo.
+
+A segunda é sobre o rádio: o p90 dele é 607.033, e o **piso** do chart é 721.380.
+Ou seja, um décimo do que a descoberta traz hoje já é praticamente chart.
+
+E o rádio **não traz ISRC** — `radioDoArtista` grava `isrc: null` porque o
+endpoint não devolve o campo. Desde a 023 o ISRC é o endereço da página, então
+toda faixa descoberta nasce sem página e cai na fila da etapa 4: o custo real por
+faixa útil do rádio é ~2 requisições, não 1. A caminhada por álbum traz 100% com
+ISRC.
+
+#### Id aleatório: medido e rejeitado
+
+A hipótese de sondar ids aleatórios do Deezer foi testada:
+
+| Faixa de ID | Acerto | Rank médio |
+|---|---|---|
+| 0–100M | 64% | 8.899 |
+| 100–500M | 8% | 2.155 |
+| 500M–1B | 16% | 31.855 |
+| 1–1,8B | 12% | 68.963 |
+| 1,8–2,4B | 8% | 64.941 |
+| 2,4B+ | 0% | — |
+
+Funciona, e é genuinamente aleatório. Mas a ~16% de acerto útil são **~6.000
+requisições por 1.000 faixas**, e rank ~13.000 não é "obscura prestes a estourar"
+— é ruído sem probabilidade de movimento. **Obscuro e aleatório não são a mesma
+coisa**, e a tese do produto quer o primeiro.
+
+#### O limite que o desenho teve de respeitar
+
+```
+/artist/58732/related  ->  0 artistas
+```
+
+O grafo de relacionados **seca na ponta obscura**. Não dá para afundar saltando
+de obscuro em obscuro: a caminhada é re-semeada do catálogo a cada vez que a
+fronteira baixa. É limitação da fonte, e é a razão de o job trabalhar a um salto.
+
+#### Por que as duas fontes convivem
+
+Ninguém sabe de que faixa de rank sai a faixa que estoura. Se o salto típico for
+400k → 900k, o rádio está mirando certo e a caminhada erra; se for 39k → 400k, o
+contrário. Trocar uma fonte pela outra seria trocar um chute por outro.
+
+A infraestrutura para responder já existia: `origin_list` guarda a procedência
+(migration 025) e `prev_rank` separa "mudou" de "entrou". A 026 só acrescentou a
+query — `discovery_source_report()` — que em ~60 dias diz qual fonte produziu
+faixa que de fato se mexeu e qual produziu faixa que alguém salvou. O corte
+`OBS_DESCOBERTA_SPLIT_ALBUM` (padrão 0,7) vira decisão medida em vez de palpite.
+
+**Ressalva de método:** as cinco sementes do A/B caíram todas na mesma vizinhança
+(eletrônico/house, a partir do Daft Punk). A direção é sólida — 11,5x de rank e
+0% → 100% de ISRC não se explicam por amostra — mas as medianas exatas devem
+variar por gênero.
 
 ---
 
@@ -785,9 +884,9 @@ mediu naquele dia, ou aquele ponto não existe*. Dizer "observando desde
 | 3 | ~~Gravar só quando o rank muda~~ **feito (021 + 022)** | médio | −63,3% nas linhas de hoje, tendendo a −92%; tabela −72,9% |
 | 4 | ~~Cadência adaptativa por orçamento fixo~~ **feito (025), ainda sem efeito** | alto | **o que realmente destrava a escala** — mas 100% do catálogo é quente até ele envelhecer (ver 5.1) |
 | 5 | ~~ISRC via `/album/{id}/tracks` em vez de `/track/{id}`~~ **feito (024), ainda não medido** | médio | ~10x na etapa 4 — o ganho aparece na próxima fila (ver nota) |
-| 6 | Medição em lote via `/artist/{id}/top` | alto | ~5x em catálogo grande |
-| 7 | Reconsiderar `OBS_MAX_CATALOGO = 10.000` | 1 env | destrava crescimento |
-| 8 | Playlists editoriais como fonte de descoberta | médio | descoberta ~100x mais barata |
+| 6 | ~~Medição em lote via `/artist/{id}/top`~~ **descartado (ver abaixo)** | alto | ~5x em catálogo grande |
+| 7 | Reconsiderar `OBS_MAX_CATALOGO = 10.000` | 1 env | **prazo correndo, ver abaixo** |
+| 8 | ~~Playlists editoriais~~ → **descoberta por álbum (ADR 002)** | médio | 11,5x mais obscura, ISRC de graça |
 | 9 | ~~ISRC como identificador canônico (em vez de spotify_id)~~ **feito (023)** | alto | tirou o risco estrutural do Spotify; 1.388 → 6.490 páginas (4,67x) |
 
 Item 2 vale a pena mesmo que nada mais seja feito. Item 1 está aplicado no
@@ -831,6 +930,75 @@ barato, então fazia mais sentido ter o mecanismo pronto **antes** de despejar
 descoberta) agora fazem mais sentido nessa ordem — 7 é um env e destrava
 crescimento que a cadência já sabe absorver; 6 e 8 baixam o custo unitário, e só
 valem depois que o volume justificar.
+
+### Revisão de 16/08/2026 — o que a medição da §4.6 mudou nesta lista
+
+**Item 1 (soltar o freio do chart): descartado.** Não por custo, por mira. As
+posições 200–300 do chart têm rank mediano 795.974 contra 865.789 do top 100 — a
+"cauda" é 92% tão popular quanto o topo, e o item expandiria o catálogo em 66%
+com material que já estourou. Contradiz a §8 deste documento. O
+`OBS_LIMITE_CHART=100` fica no ambiente como decisão, não mais como freio
+temporário.
+
+**Item 6 (`/artist/{id}/top`): descartado.** O item 4 já tirou a etapa 3 da conta
+de escala trocando O(N) por orçamento fixo. O item 6 só aumentaria quantas faixas
+cabem dentro do mesmo orçamento — otimização de constante, não de ordem de
+grandeza — e a 2,76 faixas/artista o ganho é ~2,7x, não os ~5x da tabela. Além
+disso `/artist/{id}/top` não traz ISRC (§4.5), o que quebraria o acoplamento das
+etapas 3 e 4 que hoje dá ISRC de graça a quem é medido. Fica registrado como
+alavanca disponível se um dia a razão faixas/artista subir muito.
+
+**Item 7 (`OBS_MAX_CATALOGO`): não é "quando o volume justificar", é um prazo.**
+
+```
+catálogo ativo   6.490      (medido 15/08)
+metaInicial      6.604   →  faltam 114, caem na primeira noite
+limiteDiario       250/noite a partir daí
+maxCatalogo     10.000
+(10.000 − 6.604) / 250 ≈ 14 noites
+```
+
+A descoberta bate no teto e passa a devolver `0` por volta do **início de
+setembro de 2026**, sem ninguém tocar em nada — mais tarde só se a conversão de
+semente em faixa nova ficar abaixo de 100%, o que é provável. O log diz
+`'Descoberta: teto do catálogo atingido'` com `catalogoAtivo` e `maxCatalogo`
+(`catalogDiscovery.ts:179`), então não é silencioso — **a afirmação anterior deste
+documento de que "nenhum log diz o porquê" (§4.1) está errada**. Mesmo assim é
+uma decisão com data: ou o teto sobe antes disso, ou a descoberta para e isso
+precisa ter sido uma escolha.
+
+E a §5.1 já argumentou que esse teto perdeu a razão de ser — *"elimina a
+necessidade do `OBS_MAX_CATALOGO`, que hoje é uma restrição de banco disfarçada de
+restrição de API"*. A cadência entrou na 025.
+
+**Item 8 (playlists editoriais) virou outra coisa.** A §4.4 supunha que o
+problema da descoberta era preço; a §4.6 mediu e o problema é mira. A caminhada
+por artista relacionado e álbum ([ADR 002](decisions/002-descoberta-por-album.md),
+migration 026) atende os dois: 4,65 faixas/requisição contra 3,00, rank mediano
+11,5x mais obscuro, e 100% de ISRC — o que significa que a faixa nasce com página
+e a etapa 4 não paga nada por ela. As playlists editoriais continuam sendo uma
+fonte válida e não foram implementadas; a caminhada resolveu o problema mais
+urgente primeiro.
+
+**Consequência para o orçamento.** Subir `OBS_LIMITE_DESCOBERTA` de 250 para
+1.000 é uma linha, mas não anda sozinho: o critério da banda quente inclui
+"descoberta nos últimos 30 dias", então 1.000/noite significa ~30.000 faixas
+permanentemente quentes contra `OBS_ORCAMENTO_MEDICAO = 12.000`. A fila nunca
+drenaria. A ~8 req/s, 30.000 requisições são ~62 min de janela noturna — cabe
+folgado, mas os três botões andam juntos:
+
+```
+OBS_MAX_CATALOGO       10.000  →  subir ou remover
+OBS_LIMITE_DESCOBERTA     250  →  1.000
+OBS_ORCAMENTO_MEDICAO  12.000  →  ~40.000
+```
+
+Armazenamento: a §5.4 projeta ~17 MB/ano para 10k faixas depois do delta; 40k dá
+~70 MB/ano. Não é problema.
+
+**Ordem que sobra:** 7 (+ os três botões acima, é uma decisão só) → aplicar a 026
+→ ler `discovery_source_report()` em ~60 dias e ajustar
+`OBS_DESCOBERTA_SPLIT_ALBUM`.
 
 ---
 
@@ -946,6 +1114,32 @@ await g('/chart/152/tracks?limit=500')          // n=300
 // Endpoints em lote: rank e ISRC
 await g('/artist/27/top?limit=50')     // n=50,  rank sim, isrc NÃO
 await g('/artist/27/top?limit=200')    // n=99   (teto real)
+
+// --- Descoberta por álbum (§4.6, ADR 002) — medido em 16/08/2026 -----------
+
+// nb_fan vem de graça e é o dial de obscuridade
+await g('/artist/27/related')          // n=20, 20/20 com nb_fan
+                                       // Kojak 1.656 ... Chemical Brothers 1.455.372
+// O grafo SECA na ponta obscura — a caminhada não afunda sozinha
+await g('/artist/58732/related')       // n=0
+
+// Discografia inteira em 1 requisição, e pagina por index
+await g('/artist/27/albums?limit=100') // n=36, total=36
+await g('/artist/27/albums?limit=5&index=0')  // ids A..E
+await g('/artist/27/albums?limit=5&index=5')  // ids F..J  (paginação confirmada)
+// campos úteis do álbum: record_type, release_date, fans, md5_image
+
+// Álbum profundo (não-single): obscuro de verdade
+await g('/album/<ultimo>/tracks')      // rank 247.703 / 275.142 / 329.744, isrc 3/3
+
+// Régua do chart, para comparar
+// chart/0 top100        rank min 721.380 | med 865.789 | max 990.618
+// chart/132 pos 200-300 rank med 795.974      <- a "cauda" não é cauda
+
+// Id aleatório: funciona, mas é ruído caro (~16% de acerto útil)
+//   0-100M   64%  rank médio  8.899      1-1,8B    12%  rank médio 68.963
+//   100-500M  8%  rank médio  2.155      1,8-2,4B   8%  rank médio 64.941
+//   500M-1B  16%  rank médio 31.855      2,4B+      0%  —
 await g('/album/302127/tracks')        // n=14,  rank 14/14, isrc 14/14
 await g('/playlist/1111141961/tracks?limit=100') // n=100, rank sim
 await g('/editorial/0/charts')         // tracks, albums, artists, playlists(10), podcasts

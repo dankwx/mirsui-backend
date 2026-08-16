@@ -49,6 +49,15 @@ interface DeezerAlbum {
   cover?: string
   cover_medium?: string
   md5_image?: string
+  // Só vêm em /artist/{id}/albums, não no álbum embutido na faixa.
+  record_type?: string
+  release_date?: string
+}
+
+interface DeezerArtistaRelacionado {
+  id?: number
+  name?: string
+  nb_fan?: number
 }
 
 interface DeezerFaixa {
@@ -64,6 +73,7 @@ interface DeezerFaixa {
 
 interface DeezerLista<T> {
   data?: T[]
+  total?: number
   error?: DeezerErro
 }
 
@@ -355,6 +365,110 @@ export async function faixasDoAlbum(
   })
 
   return { faixas, falhou: false }
+}
+
+export interface ArtistaRelacionado {
+  deezer_artist_id: string
+  artist_name: string | null
+  /** Fãs no Deezer. É o dial de obscuridade da descoberta por álbum. */
+  nb_fan: number | null
+}
+
+/**
+ * Os 20 artistas que o Deezer considera próximos de um dado artista.
+ *
+ * É a primeira perna da descoberta por álbum (ADR 002). O que torna este
+ * endpoint útil e o `/radio` não é `nb_fan`: ele vem de graça na resposta e
+ * permite ESCOLHER o quão obscuro é o próximo salto, em vez de aceitar o que o
+ * motor de recomendação achar melhor — que é sempre o mais popular.
+ *
+ * Medido em 16/08/2026: `/artist/27/related` devolve 20 artistas, 20/20 com
+ * `nb_fan`, de 1.656 (Kojak) a 1.455.372 (The Chemical Brothers).
+ *
+ * ATENÇÃO — o grafo seca: `/artist/58732/related` (artista pequeno) devolve
+ * ZERO. Não dá para afundar em profundidade saltando de obscuro em obscuro; a
+ * caminhada precisa ser re-semeada do catálogo. É limitação da fonte, e é a
+ * razão de o job trabalhar a um salto só.
+ */
+export async function relacionadosDoArtista(
+  deezerArtistId: string
+): Promise<{ artistas: ArtistaRelacionado[]; falhou: boolean }> {
+  const res = await dz<DeezerLista<DeezerArtistaRelacionado>>(
+    `/artist/${encodeURIComponent(deezerArtistId)}/related`
+  )
+
+  if (!res || res.error || !Array.isArray(res.data)) {
+    return { artistas: [], falhou: true }
+  }
+
+  const artistas = res.data.flatMap((a) => {
+    if (a.id == null) return []
+    return [
+      {
+        deezer_artist_id: String(a.id),
+        artist_name: a.name ?? null,
+        nb_fan: typeof a.nb_fan === 'number' ? a.nb_fan : null,
+      },
+    ]
+  })
+
+  // Fronteira vazia não é erro: o artista existe, só não tem vizinhos.
+  return { artistas, falhou: false }
+}
+
+export interface AlbumDoArtista {
+  deezer_album_id: string
+  title: string | null
+  cover_md5: string | null
+  /** album | single | ep | compilation */
+  record_type: string | null
+  release_date: string | null
+}
+
+/**
+ * A discografia de um artista, paginada.
+ *
+ * Segunda perna da descoberta por álbum. Uma requisição devolve a lista inteira
+ * (medido: 36 álbuns do Daft Punk com `limit=100`), e cada álbum vira depois
+ * uma chamada a `faixasDoAlbum` que traz 8-14 faixas com rank E ISRC.
+ *
+ * `indice` existe porque um artista pode ter mais álbuns do que cabe no
+ * orçamento de uma noite: a fronteira guarda onde parou e a rodada seguinte
+ * continua dali. A paginação por `index` foi verificada contra a API.
+ *
+ * `total` volta junto para o job saber quando a discografia acabou — sem isso
+ * o artista ficaria na fila para sempre, pedindo uma página vazia por noite.
+ */
+export async function albunsDoArtista(
+  deezerArtistId: string,
+  indice = 0,
+  limite = 50
+): Promise<{ albuns: AlbumDoArtista[]; total: number; falhou: boolean }> {
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limite)))
+  const safeIndex = Math.max(0, Math.floor(indice))
+  const res = await dz<DeezerLista<DeezerAlbum>>(
+    `/artist/${encodeURIComponent(deezerArtistId)}/albums` +
+      `?limit=${safeLimit}&index=${safeIndex}`
+  )
+
+  if (!res || res.error || !Array.isArray(res.data)) {
+    return { albuns: [], total: 0, falhou: true }
+  }
+
+  const albuns = res.data.flatMap((a) => {
+    if (a.id == null) return []
+    return [
+      {
+        deezer_album_id: String(a.id),
+        title: a.title ?? null,
+        cover_md5: extrairCoverMd5(a),
+        record_type: a.record_type ?? null,
+        release_date: a.release_date ?? null,
+      },
+    ]
+  })
+
+  return { albuns, total: typeof res.total === 'number' ? res.total : albuns.length, falhou: false }
 }
 
 /**
