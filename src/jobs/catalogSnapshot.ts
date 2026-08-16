@@ -61,6 +61,7 @@ import {
   listarGeneros,
   chartDoGenero,
   buscarFaixa,
+  buscarPorIsrc,
   buscarPorTexto,
   faixasDoAlbum,
   type FaixaObservada,
@@ -316,34 +317,74 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     // desduplicamos por artista+título aqui mesmo. Vai por lerFila() porque o
     // acervo inteiro importa: um teto aqui esconderia justamente o salvamento
     // antigo que nunca entrou no Observatório.
-    const salvas = await lerFila<{ track_title?: string; artist_name?: string }>(
-      () => db.from('tracks').select('track_title, artist_name').order('id', { ascending: false }),
+    const salvas = await lerFila<{
+      track_title?: string
+      artist_name?: string
+      isrc?: string | null
+    }>(
+      () =>
+        db
+          .from('tracks')
+          .select('track_title, artist_name, isrc')
+          .order('id', { ascending: false }),
       Infinity
     )
 
-    const unicas = new Map<string, { titulo: string; artista: string }>()
+    const unicas = new Map<string, { titulo: string; artista: string; isrc: string | null }>()
     for (const t of salvas) {
       const titulo = t.track_title
       const artista = t.artist_name
       if (!titulo || !artista) continue
       const chave = `${artista.toLowerCase()}|${titulo.toLowerCase()}`
-      if (!unicas.has(chave)) unicas.set(chave, { titulo, artista })
+      const ja = unicas.get(chave)
+      // Entre as linhas da mesma gravação (uma por pessoa que salvou), a que
+      // tem ISRC manda: é a identidade, e as antigas podem tê-lo em branco.
+      if (!ja) unicas.set(chave, { titulo, artista, isrc: t.isrc || null })
+      else if (!ja.isrc && t.isrc) ja.isrc = t.isrc
     }
 
-    // Só resolvemos quem ainda não está no Observatório. Como a ponte é por
-    // busca textual (o acervo não guarda ISRC), comparamos pelo par já gravado.
-    // Também paginado: uma lista truncada aqui não erra para o lado seguro —
-    // faria o job re-buscar no Deezer, todo dia, faixa que já é observada.
-    const jaObservadas = await lerFila<{ title?: string; artist_name?: string }>(
-      () =>
-        db
-          .from('observed_tracks')
-          .select('title, artist_name')
-          .eq('source_list', 'acervo')
-          // Ordem explícita: sem ela a paginação por .range() pode repetir ou
-          // pular linhas entre uma página e outra.
-          .order('deezer_track_id', { ascending: true }),
-      Infinity
+    // Só resolvemos quem ainda não está no Observatório — e "estar" tem duas
+    // perguntas diferentes, por isso duas leituras:
+    //
+    //   por ISRC   esta GRAVAÇÃO já é medida? Vale contra o catálogo INTEIRO,
+    //              porque a faixa pode ter entrado por chart ou rádio antes de
+    //              alguém salvá-la (é a promoção da migration 025).
+    //   por texto  esta STRING já foi resolvida? Só vale contra o que entrou
+    //              por aqui, e existe para o save anterior à 023, sem ISRC.
+    //
+    // Antes só havia a segunda, e o texto do Deezer é normalizado na gravação:
+    // 'akiaura, LONOWN, DJ Pointless' salvo virava 'Akiaura' observado, o par
+    // nunca mais casava e a faixa voltava à busca todas as noites, para sempre.
+    // Medido em 16/08/2026, antes desta mudança: 11 gravações eram re-buscadas
+    // por noite e 8 delas já estavam no Observatório sob o ISRC salvo.
+    //
+    // Paginado pelo mesmo motivo de sempre: uma lista truncada aqui não erra
+    // para o lado seguro — faria o job re-buscar faixa que já é observada.
+    const [observadas, jaObservadas] = await Promise.all([
+      lerFila<{ isrc?: string | null }>(
+        () =>
+          db
+            .from('observed_tracks')
+            .select('isrc')
+            .not('isrc', 'is', null)
+            // Ordem explícita: sem ela a paginação por .range() pode repetir ou
+            // pular linhas entre uma página e outra.
+            .order('deezer_track_id', { ascending: true }),
+        Infinity
+      ),
+      lerFila<{ title?: string; artist_name?: string }>(
+        () =>
+          db
+            .from('observed_tracks')
+            .select('title, artist_name')
+            .eq('source_list', 'acervo')
+            .order('deezer_track_id', { ascending: true }),
+        Infinity
+      ),
+    ])
+
+    const isrcsObservados = new Set(
+      observadas.flatMap((o) => (o.isrc ? [o.isrc] : []))
     )
 
     const conhecidas = new Set(
@@ -354,12 +395,26 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     )
 
     const pendentes = [...unicas.entries()]
-      .filter(([chave]) => !conhecidas.has(chave))
+      .filter(
+        ([chave, g]) =>
+          !(g.isrc && isrcsObservados.has(g.isrc)) && !conhecidas.has(chave)
+      )
       .slice(0, limiteAcervo)
 
-    // Também em paralelo, pelo mesmo motivo da etapa 3: o ritmo é da fila.
+    // O ISRC primeiro, o texto só como reserva — ver buscarPorIsrc(). Também em
+    // paralelo, pelo mesmo motivo da etapa 3: o ritmo é da fila.
+    let porIsrc = 0
     const achadas = await Promise.all(
-      pendentes.map(([, { titulo, artista }]) => buscarPorTexto(artista, titulo))
+      pendentes.map(async ([, { titulo, artista, isrc }]) => {
+        if (isrc) {
+          const exata = await buscarPorIsrc(isrc)
+          if (exata) {
+            porIsrc++
+            return exata
+          }
+        }
+        return buscarPorTexto(artista, titulo)
+      })
     )
 
     const doAcervo: FaixaObservada[] = []
@@ -372,8 +427,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
 
     resultado.doAcervo = doAcervo.length
     resultado.pontos += await gravar(doAcervo, 'acervo')
+    // `porIsrc` contra `resolvidas` é o número a acompanhar: enquanto a segunda
+    // for maior, ainda há save resolvido no palpite. `candidatas` teimosamente
+    // alto é o sinal antigo de volta — gravação salva que o Deezer não tem.
     log.info(
-      { candidatas: pendentes.length, resolvidas: doAcervo.length },
+      { candidatas: pendentes.length, resolvidas: doAcervo.length, porIsrc },
       'Observatório: acervo incorporado'
     )
   } catch (err) {

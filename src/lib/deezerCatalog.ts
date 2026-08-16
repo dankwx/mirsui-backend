@@ -496,8 +496,99 @@ export async function albunsDoArtista(
 }
 
 /**
+ * A mesma ficha, pelo ISRC — exata, porque o ISRC é a gravação.
+ *
+ * Existe para a ponte acervo → Observatório, que era só textual. A diferença
+ * não é de eficiência, é de correção: `buscarPorTexto` pega o primeiro
+ * resultado de `/search` e não tem como conferir que é a mesma gravação.
+ * Medido em 16/08/2026 no acervo real: `maxy4wyn — INSONAMIA - Slowed` devolve
+ * uma faixa de OUTRO artista ("Ronald Figo") como primeiro resultado. Uma ponte
+ * que casa errado é pior que uma que não casa — a faixa salva continua sem
+ * medição E o Observatório passa a pagar cadência eterna por uma gravação que
+ * ninguém pediu.
+ *
+ * Devolve null quando o Deezer não conhece o ISRC, e aí quem chama decide se
+ * cai para o texto.
+ */
+export async function buscarPorIsrc(isrc: string): Promise<FaixaObservada | null> {
+  const t = await dz<DeezerFaixa>('/track/isrc:' + encodeURIComponent(isrc))
+  if (!t || t.error || t.id == null || typeof t.rank !== 'number') return null
+
+  const nomeTitulo = t.title || t.title_short
+  const nomeArtista = t.artist?.name
+  if (!nomeTitulo || !nomeArtista) return null
+
+  return {
+    deezer_track_id: String(t.id),
+    deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+    deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
+    isrc: t.isrc ?? isrc,
+    title: nomeTitulo,
+    artist_name: nomeArtista,
+    album_name: t.album?.title ?? null,
+    cover_md5: extrairCoverMd5(t.album),
+    genre: null,
+    source_list: 'acervo',
+    rank: t.rank,
+  }
+}
+
+/** Minúsculas, sem acento e sem pontuação — só para comparar nome de artista. */
+function normalizarNome(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+/** Os artistas de um crédito: 'A, B & C (feat. D)' -> ['a','b','c','d']. */
+function partesDoCredito(s: string): Set<string> {
+  return new Set(
+    s
+      .split(/,|&|\bfeat\.?\b|\bft\.?\b|\bwith\b|\/|\+/i)
+      .map(normalizarNome)
+      .filter(Boolean)
+  )
+}
+
+/**
+ * O crédito do Deezer e o do acervo falam da mesma pessoa?
+ *
+ * Comparação por CONJUNTO de artistas, não por substring: o acervo guarda o
+ * elenco todo ('akiaura, LONOWN, DJ Pointless') e o Deezer guarda só o
+ * principal ('Akiaura'), então exigir igualdade rejeitaria casamento bom; mas
+ * aceitar substring aprovaria 'Drake' contra 'Drake Bell'. Interseção não-vazia
+ * acerta os dois: conferido contra as 8 divergências reais do acervo em
+ * 16/08/2026, aceita as 8 e rejeita o único caso errado ('maxy4wyn' contra
+ * 'Ronald Figo').
+ *
+ * Crédito sem nenhum caractere latino normaliza para vazio e é rejeitado. É a
+ * direção segura: a busca por texto não tem como conferir esse caso, e desde a
+ * migration 023 quem resolve essas faixas é o ISRC.
+ */
+function mesmoArtista(doAcervo: string, doDeezer: string): boolean {
+  const a = partesDoCredito(doAcervo)
+  const b = partesDoCredito(doDeezer)
+  for (const nome of b) if (a.has(nome)) return true
+  return false
+}
+
+/**
  * Acha no Deezer uma faixa que só temos por texto (usado para trazer o acervo
  * do site para o Observatório). Passa pela mesma fila do resto do job.
+ *
+ * Reserva de `buscarPorIsrc`, não caminho principal: só sobra para o save
+ * antigo, anterior à migration 023, que não guardou ISRC.
+ *
+ * O primeiro resultado de `/search` só é aceito se o artista bater. Sem essa
+ * conferência a ponte inventa: em 16/08/2026 havia no Observatório uma linha
+ * 'Ronald Figo — INSONAMIA (Slowed)' marcada como `acervo`, que entrou aqui no
+ * lugar do save 'maxy4wyn — INSONAMIA - Slowed'. O estrago é duplo — a faixa
+ * salva continua sem medição e o catálogo paga cadência eterna por uma
+ * gravação que ninguém pediu — e nada no log dizia isso, porque para o job um
+ * palpite errado é indistinguível de um acerto.
  */
 export async function buscarPorTexto(
   artista: string,
@@ -507,6 +598,7 @@ export async function buscarPorTexto(
   const res = await dz<DeezerLista<DeezerFaixa>>('/search?limit=1&q=' + q)
   const t = res?.data?.[0]
   if (!t?.id || typeof t.rank !== 'number') return null
+  if (!t.artist?.name || !mesmoArtista(artista, t.artist.name)) return null
 
   const nomeArtista = t.artist?.name || artista
   const nomeTitulo = t.title || t.title_short || titulo
