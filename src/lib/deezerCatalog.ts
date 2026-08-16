@@ -163,6 +163,24 @@ async function dz<T>(path: string): Promise<T | null> {
   })
 }
 
+/**
+ * `code: 800` (DataException, "no data") é RESPOSTA, não falha.
+ *
+ * O Deezer devolve HTTP 200 com este erro quando o recurso existe mas não tem o
+ * que se pediu — artista sem rádio, sem relacionados, sem álbum. Medido em
+ * 16/08/2026: 10 de 12 artistas da fila de sementes devolvem 800 em
+ * `/artist/{id}/radio`, porque são artistas pequenos demais para a Deezer ter
+ * montado uma rádio.
+ *
+ * A distinção importa para todo job que grava marca de "já tentei": tratar 800
+ * como falha transitória faz a semente voltar à fila todas as noites, para
+ * sempre, falhando sempre — e a fila entope de sementes impossíveis sem que
+ * nada no log diga isso. É a mesma lição que `faixasDoAlbum` já registrava
+ * ("o álbum não tem esta faixa" contra "não consegui perguntar"); aqui ela vale
+ * para os três endpoints de descoberta.
+ */
+const SEM_DADOS = 800
+
 /** Extrai o md5 da capa: ou vem pronto, ou está no meio da URL do CDN. */
 function extrairCoverMd5(album?: DeezerAlbum): string | null {
   if (album?.md5_image) return album.md5_image
@@ -397,6 +415,8 @@ export async function relacionadosDoArtista(
     `/artist/${encodeURIComponent(deezerArtistId)}/related`
   )
 
+  if (res?.error?.code === SEM_DADOS) return { artistas: [], falhou: false }
+
   if (!res || res.error || !Array.isArray(res.data)) {
     return { artistas: [], falhou: true }
   }
@@ -450,6 +470,10 @@ export async function albunsDoArtista(
     `/artist/${encodeURIComponent(deezerArtistId)}/albums` +
       `?limit=${safeLimit}&index=${safeIndex}`
   )
+
+  // Sem álbum é discografia vazia, não erro: o job marca o artista como
+  // exaurido e ele sai da fronteira em vez de ser repescado toda noite.
+  if (res?.error?.code === SEM_DADOS) return { albuns: [], total: 0, falhou: false }
 
   if (!res || res.error || !Array.isArray(res.data)) {
     return { albuns: [], total: 0, falhou: true }
@@ -520,6 +544,10 @@ export async function radioDoArtista(
   const res = await dz<DeezerLista<DeezerFaixa>>(
     `/artist/${encodeURIComponent(deezerArtistId)}/radio?limit=${safeLimit}`
   )
+
+  // Artista sem rádio é resposta definitiva: a semente vira "sem candidata" e
+  // sai da fila. Sem este caso, ela voltaria toda noite para sempre.
+  if (res?.error?.code === SEM_DADOS) return { faixas: [], falhou: false }
 
   if (!res || res.error || !Array.isArray(res.data)) {
     return { faixas: [], falhou: true }
