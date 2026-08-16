@@ -12,10 +12,11 @@
 //   2. Traz para o Observatório as faixas que os usuários salvaram e que ainda
 //      não estavam sendo medidas. É a ponta obscura do catálogo — o chart sozinho
 //      enviesa tudo para o que já estourou, e "antes de estourar" é a tese.
-//   3. Mede individualmente quem já é observado mas não apareceu em chart hoje,
-//      do menos recentemente medido para o mais recente. É o passo que faz o
+//   3. Mede individualmente quem VENCEU a própria cadência. É o passo que faz o
 //      Observatório continuar seguindo uma faixa depois que ela sai do chart —
-//      inclusive na descida.
+//      inclusive na descida. Desde a migration 025 esta fila não é mais "todo
+//      mundo que não medi hoje": cada faixa tem uma banda (quente/morna/fria) e
+//      a rodada para quando o ORÇAMENTO acaba, não quando o catálogo acaba.
 //   4. Preenche o ISRC de quem entrou sem ele. Esta etapa deixou de ser
 //      acessória: o ISRC é o ENDEREÇO das páginas desde a migration 023, então
 //      é ela que dá página às faixas novas. Vai por /album/{id}/tracks, que
@@ -30,6 +31,24 @@
 // (POST /tracks/resolve-spotify). O `spotify_track_id` continua na tabela e
 // continua sendo preenchido — só que por visita, não por varredura.
 // Ver docs/plano-independencia-do-spotify.md, fases 4 e 5.
+//
+// A CADÊNCIA (item 4 da análise de escala, migration 025)
+// Medir tudo todo dia é O(N): dobrou o catálogo, dobrou a noite. Como 91,9% das
+// medições consecutivas leem o mesmo rank, quase toda essa requisição existe
+// para descobrir que nada mudou. Agora cada faixa tem uma banda —
+//
+//   quente  stake ativo, salva, entrou há < 30 dias, ou subindo    1 dia
+//   morna   teve movimento nos últimos 30 dias                     7 dias
+//   fria    nada disso                                            14 dias
+//
+// — e a etapa 3 gasta um ORÇAMENTO FIXO de requisições por noite, na ordem de
+// prioridade. O catálogo cresce, a rodada não.
+//
+// IMPORTANTE PARA LER O LOG: enquanto o catálogo inteiro for mais novo que
+// OBS_JANELA_NOVIDADE, todas as faixas são quentes e a cadência não economiza
+// nada. Isso é o comportamento correto, não uma configuração que não pegou —
+// a economia aparece conforme o catálogo envelhece. O campo `bandas` do log diz
+// a distribuição real de cada noite.
 //
 // Nada aqui é obrigatório para o job ser útil: se um passo falhar, os outros
 // gravam mesmo assim. Um dia com metade dos pontos vale muito mais que um dia
@@ -65,6 +84,23 @@ export interface ResultadoObservatorio {
   doChart: number
   doAcervo: number
   medidasIndividuais: number
+  /** faixas cujo source_list virou 'acervo' porque alguém as salvou */
+  promovidasAoAcervo: number
+  /** faixas que trocaram de banda de cadência nesta rodada */
+  reclassificadas: number
+  /** distribuição das bandas depois do recálculo: {quente, morna, fria} */
+  bandas: Record<string, number>
+  /** teto de requisições da etapa 3 nesta noite */
+  orcamentoMedicao: number
+  /** quantas faixas estavam vencidas — se passar do orçamento, sobra fila */
+  filaVencida: number
+  /**
+   * Faixas vencidas que o orçamento não alcançou. Existe para o corte NUNCA ser
+   * silencioso: elas continuam vencidas e voltam no topo da fila amanhã, mas
+   * um número teimosamente alto aqui significa orçamento pequeno demais para o
+   * catálogo — é o sinal de subir OBS_ORCAMENTO_MEDICAO ou esfriar as bandas.
+   */
+  adiadas: number
   isrcPreenchidos: number
   /** requisições a /album/{id}/tracks — cada uma cobre o álbum inteiro */
   isrcRequisicoesDeAlbum: number
@@ -109,6 +145,12 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     doChart: 0,
     doAcervo: 0,
     medidasIndividuais: 0,
+    promovidasAoAcervo: 0,
+    reclassificadas: 0,
+    bandas: {},
+    orcamentoMedicao: 0,
+    filaVencida: 0,
+    adiadas: 0,
     isrcPreenchidos: 0,
     isrcRequisicoesDeAlbum: 0,
     isrcResolvidosPorAlbum: 0,
@@ -133,16 +175,38 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // engano — o endpoint sempre devolveu 300, pelo mesmo custo de 1 requisição.
   const limiteChart = num('OBS_LIMITE_CHART', 300)
   const limiteAcervo = num('OBS_LIMITE_ACERVO', Infinity)
-  const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
   const limiteIsrc = num('OBS_LIMITE_ISRC', Infinity)
+
+  // O orçamento da etapa 3. Este é o único teto do job que NÃO é um freio de
+  // emergência: é o mecanismo. Diferente dos OBS_LIMITE_*, cortar aqui não é
+  // silencioso — `filaVencida` e `adiadas` vão no log de toda rodada.
+  //
+  // 12.000 a ~8 req/s são ~25 min de etapa 3, dentro da janela noturna, e quase
+  // 2x o catálogo de hoje (6.490) — ou seja, não corta nada agora. O número que
+  // importa não é este e sim a cadência: é ela que decide quantas faixas chegam
+  // a ficar vencidas por noite.
+  const orcamentoMedicao = num('OBS_ORCAMENTO_MEDICAO', 12_000)
+  // OBS_LIMITE_MEDICAO continua existindo como freio manual, acima do orçamento.
+  const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
+
+  // A banda fria é o parâmetro que manda na conta (é 70% da massa num catálogo
+  // maduro): custo/dia = 0,05N + 0,25N/7 + 0,70N/C_fria. Com C_fria em 30 dá
+  // 9,2x; em 14, 7,4x; em 7, 5,4x. O padrão é 14 porque a faixa fria é onde
+  // mora a obscura que está prestes a estourar, e a janela cega de uma
+  // descoberta tardia é exatamente o tamanho desta cadência.
+  const cadenciaMorna = num('OBS_CADENCIA_MORNA', 7)
+  const cadenciaFria = num('OBS_CADENCIA_FRIA', 14)
+  const janelaMovimento = num('OBS_JANELA_MOVIMENTO', 30)
+  const janelaNovidade = num('OBS_JANELA_NOVIDADE', 30)
 
   const resultado = { ...vazio }
   const inicio = Date.now()
 
-  // Início do dia em UTC — mesma fronteira do índice de idempotência.
-  const hojeUTC = new Date()
-  hojeUTC.setUTCHours(0, 0, 0, 0)
-  const hojeISO = hojeUTC.toISOString()
+  // A fronteira do dia em UTC — a mesma do índice de idempotência da migration
+  // 009 — deixou de ser calculada aqui: desde a 025 quem decide se uma faixa
+  // está vencida é observatory_measurement_queue(), no banco, onde a data e o
+  // registro de last_checked_at compartilham o mesmo relógio. Duas noções de
+  // "hoje" (a do processo e a do Postgres) só podiam divergir.
 
   /** Envia um conjunto de medições em lotes e soma os pontos gravados. */
   const gravar = async (faixas: FaixaObservada[], etapa: string): Promise<number> => {
@@ -305,6 +369,57 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     log.error({ err }, 'Observatório: incorporação do acervo falhou')
   }
 
+  // -------------------------------------------------------------------------
+  // 2.5. Quem é quem: promoção e bandas de cadência
+  // -------------------------------------------------------------------------
+  // Duas coisas, nesta ordem, e nenhuma delas fala com o Deezer — é SQL puro
+  // sobre o que já está no banco, então não gasta nada do orçamento.
+  //
+  // A promoção primeiro: faixa que alguém salvou passa a ser classificada como
+  // acervo, tenha entrado por onde tiver entrado. Antes da migration 025,
+  // source_list era gravado na entrada e nunca mais mexido — faixa que entrou
+  // pelo chart e foi salva continuava lida como 'chart:81' para sempre. A
+  // origem não se perde: fica em origin_list.
+  //
+  // A classificação depois, porque a banda depende de quem está salva.
+  //
+  // Roda antes da etapa 3 e depois das etapas 1 e 2 de propósito: assim as
+  // faixas que entraram hoje já nascem classificadas, e as do chart já estão
+  // com last_checked_at de hoje quando a fila for lida — saem da fila sozinhas,
+  // sem lista de exclusão.
+  try {
+    const { data: promovidas, error: errPromo } = await db.rpc('promote_saved_observed_tracks')
+    if (errPromo) throw errPromo
+    resultado.promovidasAoAcervo = Number(promovidas) || 0
+
+    const { data: cadencia, error: errCadencia } = await db.rpc('refresh_observatory_cadence', {
+      p_cadencia_morna: cadenciaMorna,
+      p_cadencia_fria: cadenciaFria,
+      p_janela_movimento: janelaMovimento,
+      p_janela_novidade: janelaNovidade,
+    })
+    if (errCadencia) throw errCadencia
+
+    const c = (cadencia ?? {}) as { reclassificadas?: number; distribuicao?: Record<string, number> }
+    resultado.reclassificadas = Number(c.reclassificadas) || 0
+    resultado.bandas = c.distribuicao ?? {}
+
+    log.info(
+      {
+        promovidas: resultado.promovidasAoAcervo,
+        reclassificadas: resultado.reclassificadas,
+        bandas: resultado.bandas,
+        cadencias: { quente: 1, morna: cadenciaMorna, fria: cadenciaFria },
+      },
+      'Observatório: cadência recalculada'
+    )
+  } catch (err) {
+    resultado.falhas++
+    // Não é fatal: sem recálculo, a etapa 3 usa a banda da rodada anterior. O
+    // pior caso é medir com a classificação de ontem, não deixar de medir.
+    log.error({ err }, 'Observatório: recálculo de cadência falhou')
+  }
+
   // Uma faixa não é consultada duas vezes na mesma rodada, mesmo que caia nos
   // critérios das etapas 3 e 4 ao mesmo tempo.
   const consultadasNestaRodada = new Set<string>()
@@ -411,21 +526,43 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   }
 
   // -------------------------------------------------------------------------
-  // 3. Quem não apareceu em chart hoje
+  // 3. Quem venceu a própria cadência
   // -------------------------------------------------------------------------
+  // A fila vem pronta do banco (migration 025): só quem está vencida para a
+  // própria banda, já ordenada por prioridade e já cortada no orçamento. O job
+  // não lê mais o catálogo inteiro para filtrar em memória — sai junto a
+  // paginação de 1.000 linhas do PostgREST, que só existia por causa disso.
+  //
+  // A ordem dentro do orçamento é: quem alguém está acompanhando (stake ou
+  // save) primeiro, depois o resto do quente, depois morna, depois fria; e
+  // dentro de cada grupo, a mais tempo sem medir na frente.
   try {
-    const atrasadas = await lerFila<LinhaObservada>(
-      () =>
-        db
-          .from('observed_tracks')
-          .select('deezer_track_id, deezer_artist_id, deezer_album_id, title, artist_name, source_list')
-          .eq('active', true)
-          .or(`last_checked_at.is.null,last_checked_at.lt.${hojeISO}`)
-          .order('last_checked_at', { ascending: true, nullsFirst: true }),
-      limiteMedicao
-    )
+    const orcamento = Math.min(orcamentoMedicao, limiteMedicao)
+    resultado.orcamentoMedicao = Number.isFinite(orcamento) ? orcamento : 0
 
-    const candidatas = atrasadas.filter((r) => !vistasHoje.has(r.deezer_track_id))
+    // Quantas estavam vencidas ANTES do corte. É isto que impede o orçamento de
+    // ser um teto silencioso — o defeito que o comentário de num() nomeia.
+    const { data: tamanhoFila, error: errTamanho } = await db.rpc('observatory_queue_size')
+    if (errTamanho) throw errTamanho
+    resultado.filaVencida = Number(tamanhoFila) || 0
+    resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.orcamentoMedicao)
+
+    const { data: fila, error: errFila } = await db.rpc('observatory_measurement_queue', {
+      p_limite: resultado.orcamentoMedicao,
+    })
+    if (errFila) throw errFila
+
+    const vencidas = (fila ?? []) as (LinhaObservada & { cadence_band: string | null })[]
+    const candidatas = vencidas.filter((r) => !vistasHoje.has(r.deezer_track_id))
+
+    // Em que bandas o orçamento foi gasto. É a composição da FILA, não o
+    // resultado da medição: faixa que o Deezer não respondeu conta aqui e não
+    // em `medidas`. É o número que responde "o orçamento está indo para onde?".
+    const filaPorBanda: Record<string, number> = {}
+    for (const r of candidatas) {
+      const banda = r.cadence_band ?? 'quente'
+      filaPorBanda[banda] = (filaPorBanda[banda] ?? 0) + 1
+    }
 
     await processarEmBlocos(candidatas, async ({ medidas, sumiram }) => {
       resultado.medidasIndividuais += medidas.length
@@ -434,8 +571,17 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     })
 
     log.info(
-      { medidas: resultado.medidasIndividuais, desativadas: resultado.desativadas },
-      'Observatório: medições individuais concluídas'
+      {
+        orcamento: resultado.orcamentoMedicao,
+        filaVencida: resultado.filaVencida,
+        medidas: resultado.medidasIndividuais,
+        filaPorBanda,
+        adiadas: resultado.adiadas,
+        desativadas: resultado.desativadas,
+      },
+      resultado.adiadas > 0
+        ? 'Observatório: orçamento esgotado, fila sobrou para amanhã'
+        : 'Observatório: medições individuais concluídas'
     )
   } catch (err) {
     resultado.falhas++

@@ -1,9 +1,12 @@
 # Análise de escala — limites de API e crescimento do banco
 
 - **Data:** 15 de agosto de 2026
-- **Status** (marcação revista em 16/08/2026): **itens 2, 3, 5 e 9 aplicados em
-  produção**; item 1 aplicado no código e freado no ambiente (ver 4.1 e 9);
-  **pendentes 4, 6, 7 e 8**. A `track_popularity_history` saiu de 5.632 kB /
+- **Status** (marcação revista em 16/08/2026): **itens 2, 3, 4, 5 e 9 aplicados
+  em produção**; item 1 aplicado no código e freado no ambiente (ver 4.1 e 9);
+  **pendentes 6, 7 e 8**. O item 4 entrou pela migration 025 e é o que troca
+  O(N) por orçamento fixo — mas ele **não economiza nada ainda**, porque o
+  catálogo inteiro tem menos de 30 dias e é 100% quente (ver 5.1). A
+  `track_popularity_history` saiu de 5.632 kB /
   21.027 linhas para **1.528 kB / 7.707 linhas (−72,9%)** (migrations 020, 021 e
   022), com a saída das funções de leitura inalterada byte a byte. Os itens 5 e 9
   entraram junto, pelo
@@ -362,6 +365,11 @@ atual (frear a fila inteira, não só a chamada que falhou) está correto.
 
 ### 5.1 Cadência adaptativa — troca O(N) por orçamento fixo
 
+> **Aplicado em 16/08/2026** — migration `025_cadencia_adaptativa.sql`. As três
+> bandas, o orçamento fixo, a promoção de faixa salva e a correção da dívida que
+> a 021 deixou marcada entraram juntos. **O que a implementação encontrou está
+> abaixo da proposta, e muda coisas importantes.**
+
 Dado que 92% não muda, medir tudo diariamente é indefensável. Proposta de três
 faixas de cadência:
 
@@ -391,6 +399,155 @@ rodada não. É a diferença entre um job que escala e um que não escala.
 
 Isso também elimina a necessidade do `OBS_MAX_CATALOGO`, que hoje é uma
 restrição de banco disfarçada de restrição de API.
+
+#### O que a implementação encontrou
+
+**As bandas não são níveis de popularidade, e a tabela acima comunica isso mal.**
+Lida rápido, "quente/morna/fria" parece uma escala de rank. Não é: o eixo é
+**interesse e movimento**. Faixa no rank 400.000 que uma pessoa salvou é quente;
+faixa no rank 800 que ninguém tocou e não mexe há dois meses é fria. Popularidade
+não entra em critério nenhum — o que entra é a derivada dela e a existência de
+gente interessada. É o mesmo princípio da seção 8 (*o custo escala com interesse,
+não com catálogo*) aplicado à cadência.
+
+**Hoje isso não economiza nada, e está certo assim.** Medido em 16/08/2026, antes
+de aplicar:
+
+```
+ativas                              6.490
+entraram entre 10/08 e 15/08        6.490   ← 100% do catálogo
+com histórico de mais de 30 dias        0
+```
+
+O catálogo inteiro tem menos de sete dias, então "descoberta nos últimos 30 dias"
+torna **toda** faixa quente. A primeira classificação real confirmou:
+`{"quente": 6490}`. A cadência é um no-op na primeira noite e a economia aparece
+conforme o catálogo envelhece. Quem for ler o log de agosto procurando o ganho
+não vai achar — não porque a configuração não pegou, mas porque o critério
+"entrou há pouco" está funcionando.
+
+**A distribuição 5/25/70 era chute, e o formato real parece outro.** Forçando as
+janelas para 3 dias (simulação, para ver as bandas separarem num catálogo que
+ainda não tem idade para isso):
+
+| Banda | Prioridade | Faixas | % |
+|---|---|---|---|
+| quente — stake ou salva | 0 | 32 | 0,5% |
+| quente — nova ou subindo | 1 | 3.447 | 53,1% |
+| morna | 2 | 145 | 2,2% |
+| fria | 3 | 2.866 | 44,2% |
+
+A **morna quase não existe** (2,2% contra os 25% supostos). Faz sentido: faixa ou
+se mexe — e aí sobe, e vira quente — ou não se mexe, e vira fria. A banda do meio
+é um estado de transição, não uma população. Se isso se confirmar num catálogo
+maduro, a conta real fica mais perto de `0,05N + 0,02N/7 + 0,93N/C_fria`, e o
+parâmetro da banda fria manda ainda mais do que a proposta previa. **O log da
+rodada passa a trazer `bandas` toda noite**, então isso deixa de ser suposição em
+30 dias.
+
+**A cadência fria ficou em 14 dias, não 30.** A banda fria é onde mora a faixa
+obscura que ninguém tocou *ainda* e que está prestes a estourar — exatamente a
+tese do produto. Ela é promovida a quente na primeira medição que detectar a
+subida, então a subida não se perde; perde-se o **começo** dela, e a janela cega
+tem o tamanho exato da cadência fria. O gráfico mostra um degrau onde deveria ter
+uma curva. O preço de encurtar essa janela:
+
+```
+C_fria = 30  ->  0,109N  ->  9,2x
+C_fria = 14  ->  0,136N  ->  7,4x   ← padrão adotado
+C_fria =  7  ->  0,186N  ->  5,4x
+```
+
+Cortar de 30 para 14 custa 20% do ganho e corta a janela cega pela metade. É
+`OBS_CADENCIA_FRIA`, não é dogma.
+
+**A prioridade 0 existe porque orçamento aperta.** Dentro da banda quente, quem
+tem stake ativo ou foi salva vem antes de quem é apenas nova. Quando a fila passa
+do orçamento, a faixa que alguém está acompanhando é a última que pode ficar sem
+ponto no dia.
+
+**O corte do orçamento não pode ser silencioso.** O comentário de `OBS_LIMITE_*`
+em `catalogSnapshot.ts` já nomeava esse defeito: um teto de contagem faz faixas
+sumirem da série do dia sem nada gritar no log. Por isso o orçamento vem com
+`observatory_queue_size()` ao lado, e toda rodada loga `filaVencida` e `adiadas`.
+Verificado com orçamento de 5 numa fila de 3.415: `adiadas: 3410`, e a mensagem
+do log troca para "orçamento esgotado, fila sobrou para amanhã".
+
+#### A dívida da 021, paga
+
+A gravação por delta assume que "sem linha no dia" significa "medi e não mudou".
+Com cadência isso deixa de valer — faixa fria passa 14 dias sem medição, e
+preencher esse intervalo seria invenção, que é o que a migration 009 proíbe.
+
+A 025 resolve com `track_popularity_history.measured_gap_days`: cada linha de
+mudança carrega **a largura da janela em que a mudança pode ter acontecido**. Com
+medição diária é sempre 1 e não afirma nada de novo. Com cadência fria, uma linha
+com gap 14 diz "o rank era 400.000 quando olhei da última vez, é 5.000 agora, e a
+virada aconteceu em algum ponto destes 14 dias".
+
+`get_track_curve` ganhou duas chaves e **`series` saiu byte a byte igual** — o
+front é outro repositório e não podia quebrar. Verificado nas 6.475 gravações com
+ISRC: **zero divergências**, e o hash de `get_landing_observatory` idêntico antes
+e depois. As chaves novas são aditivas:
+
+```json
+"cadencia_dias": 14,
+"lacunas": [{ "de": "2026-08-03", "ate": "2026-08-15" }]
+```
+
+O que isto **não** resolve, e é honesto registrar: em trechos *planos* da curva
+continua-se sem saber quais dias foram medidos. Mas ali o valor é o mesmo nas duas
+pontas, e o único erro possível é esconder um pico que subiu e voltou dentro da
+janela — afirmação muito mais fraca do que inventar a data de um degrau, que é o
+que esta parte corrige. Quem precisar da resolução do trecho plano lê
+`cadencia_dias`.
+
+#### Salvou? então saiu do chart
+
+`source_list` era gravado na entrada e nunca mais mexido: faixa que entrou pelo
+chart e foi salva depois continuava lida como `chart:81` para sempre. Medido antes
+da migration: **2 faixas salvas estavam marcadas como chart/radio** — "Get Lucky"
+(entrou por `chart:165`) e "3:30 A.M" (entrou por `radio:234423431`).
+
+Agora `promote_saved_observed_tracks()` roda a cada rodada e promove essas faixas
+a `acervo`. A origem não se perde: foi para a coluna nova `origin_list`, imutável,
+que é o que a migration 009 realmente queria de `source_list` ("saber se o
+Observatório está enviesado para o que já é popular").
+
+Duas decisões que valem registro:
+
+- **A promoção é de mão única.** Quem salvou e depois desfez continua marcado como
+  acervo. Desmarcar reescreveria a linha toda noite para todo mundo que já
+  desfez um save — escrita cara por informação que a banda já obtém de graça.
+- **A banda não lê `source_list`.** Ela usa o join vivo com `tracks` e `stakes`.
+  Ou seja: a coluna conta a história, o join manda na cadência. Quem desfez o save
+  esfria sozinho, sem escrita nenhuma. Isso também é o que faz a promoção não ter
+  latência: ela roda na etapa 2.5, antes da etapa 3 da mesma rodada, então faixa
+  salva a qualquer hora do dia já está quente na medição daquela noite — não
+  precisou de gancho na rota de save.
+
+#### O que vigiar quando o projeto crescer
+
+- **"Quente" não tem prazo de validade.** "Descoberta nos últimos 30 dias" expira;
+  "salva por alguém" e "tem stake ativo" não. Se o acervo crescer muito, a banda
+  quente vira o catálogo inteiro e a rodada volta a crescer com ele — O(N) de
+  novo, com constante menor. Isso é coerente com o princípio (acervo cresce com
+  interesse, não com catálogo), mas os 5% da distribuição proposta são uma
+  **suposição sobre o acervo continuar pequeno em relação ao catálogo**. Hoje são
+  36 faixas em 6.490 (0,55%). Vigiar essa razão vale mais que vigiar o orçamento.
+- **O join da classificação é `tracks × observed_tracks` por artista+título** para
+  as faixas sem ISRC dos dois lados. A 1M de faixas isso deixa de ser barato. A
+  saída natural é exigir ISRC nos dois lados quando o acervo tiver ISRC em tudo
+  (a migration 023 já preenche no save) e aposentar o casamento textual.
+- **`refresh_observatory_cadence()` grava só quem trocou de banda**, pelo mesmo
+  motivo da 021: um UPDATE que toca todas as linhas toda noite gera uma versão
+  nova de cada tupla por dia, e a 1M de faixas isso é bloat diário maior que o
+  histórico que estamos economizando. Se um dia a distribuição ficar instável e
+  esse número não parar de subir, o problema é o critério oscilando num limiar,
+  não a escrita.
+- **O orçamento de 12.000 é folgado de propósito** (a ~8 req/s são ~25 min, e o
+  catálogo tem 6.490). Ele não é o que faz a economia — quem faz é a cadência. O
+  orçamento é a rede de segurança que garante que a noite tem fim.
 
 ### 5.2 Gravar só quando o rank muda
 
@@ -440,11 +597,12 @@ gravado. Comparando com a tabela, a regra se auto-corrige.
 parou de medir a faixa, a curva termina na última medição real em vez de esticar
 uma reta que ninguém observou.
 
-**Ressalva para o item 4:** tudo isso vale porque hoje o job mede todas as faixas
-todo dia, então "sem linha" só pode significar "medi e não mudou". Com cadência
-adaptativa, faixa fria passa 30 dias sem medição e o forward-fill sobre esse
-intervalo **seria** invenção — o item 4 precisa distinguir "medi e não mudou" de
-"não medi".
+**Ressalva para o item 4** — *paga em 16/08/2026 pela migration 025*: tudo isso
+valia porque o job media todas as faixas todo dia, então "sem linha" só podia
+significar "medi e não mudou". Com cadência adaptativa, faixa fria passa 14 dias
+sem medição e o forward-fill sobre esse intervalo **seria** invenção. A 025
+resolveu com `measured_gap_days` na linha de mudança e a chave `lacunas` em
+`get_track_curve` — ver o fim da seção 5.1.
 
 #### Resultado da compactação (022)
 
@@ -625,7 +783,7 @@ mediu naquele dia, ou aquele ponto não existe*. Dizer "observando desde
 | 1 | ~~`limit=300` no chart~~ **feito, freado** | 1 linha | 3,00x de cobertura; −20,9% na etapa 3, **+66% de catálogo** (ver 4.1) |
 | 2 | ~~Dropar os índices redundantes~~ **feito (020)** | 2 linhas SQL | −39,3% de índice; 274 → 201 B/linha |
 | 3 | ~~Gravar só quando o rank muda~~ **feito (021 + 022)** | médio | −63,3% nas linhas de hoje, tendendo a −92%; tabela −72,9% |
-| 4 | Cadência adaptativa por orçamento fixo | alto | **o que realmente destrava a escala** |
+| 4 | ~~Cadência adaptativa por orçamento fixo~~ **feito (025), ainda sem efeito** | alto | **o que realmente destrava a escala** — mas 100% do catálogo é quente até ele envelhecer (ver 5.1) |
 | 5 | ~~ISRC via `/album/{id}/tracks` em vez de `/track/{id}`~~ **feito (024), ainda não medido** | médio | ~10x na etapa 4 — o ganho aparece na próxima fila (ver nota) |
 | 6 | Medição em lote via `/artist/{id}/top` | alto | ~5x em catálogo grande |
 | 7 | Reconsiderar `OBS_MAX_CATALOGO = 10.000` | 1 env | destrava crescimento |
@@ -637,6 +795,16 @@ código mas **freado no ambiente**: ele expande o catálogo em 66%, e isso só �
 barato depois do item 3 (ver a correção na seção 4.1). Item 4 é o único que muda
 a natureza do problema de O(N) para O(1) — os outros compram tempo, esse compra
 escala.
+
+**O item 4 está aplicado e ainda assim a rodada de hoje é idêntica à de ontem.**
+Não é contradição: a banda quente inclui "entrou nos últimos 30 dias" e o
+catálogo inteiro entrou entre 10 e 15 de agosto, então a primeira classificação
+deu `{"quente": 6490}`. O mecanismo está montado e o ganho é uma função do tempo,
+não de mais código — a partir de meados de setembro as faixas começam a esfriar
+sozinhas e o `bandas` do log passa a mostrar a economia. **Soltar o freio do item
+1 agora ficou barato justamente por causa disso**: as ~4.305 faixas novas entram
+quentes por 30 dias e depois caem para a banda fria de 14 dias, em vez de custar
+uma requisição por noite para sempre.
 
 **Os itens 5 e 9 entraram juntos, e não por esta ordem** — vieram a reboque do
 [plano de independência do Spotify](plano-independencia-do-spotify.md), porque o
@@ -653,7 +821,16 @@ tudo passou pelo caminho antigo, uma requisição por faixa. Hoje a coluna tem
 3.075 faixas preenchidas e a fila está em 0: o ganho aparece na próxima fila, e
 por isso a linha da tabela diz "feito, ainda não medido".
 
-**Ordem revisada de execução:** 2 → 3 → ~~9~~ → ~~5~~ → soltar o freio do 1 → 4.
+**Ordem revisada de execução:** ~~2~~ → ~~3~~ → ~~9~~ → ~~5~~ → ~~4~~ → soltar o
+freio do 1 → 7 → 6 → 8.
+
+O item 4 entrou antes de soltar o freio do 1, e não depois como a ordem anterior
+previa. Foi de propósito: a cadência é o que torna o crescimento de catálogo
+barato, então fazia mais sentido ter o mecanismo pronto **antes** de despejar
+4.305 faixas novas do que depois. Os itens 7 (teto do catálogo) e 6/8 (lote e
+descoberta) agora fazem mais sentido nessa ordem — 7 é um env e destrava
+crescimento que a cadência já sabe absorver; 6 e 8 baixam o custo unitário, e só
+valem depois que o volume justificar.
 
 ---
 
