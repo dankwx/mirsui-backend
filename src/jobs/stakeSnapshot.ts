@@ -12,6 +12,7 @@ interface StakeRow {
   deezer_track_id: string | null
   multiplier: number
   last_popularity: number
+  peak_popularity: number
   accumulated_points: number
 }
 
@@ -31,7 +32,9 @@ export async function runStakeSnapshot(logger?: {
 
   const { data: stakes, error } = await supabaseAdmin
     .from('stakes')
-    .select('id, deezer_track_id, multiplier, last_popularity, accumulated_points')
+    .select(
+      'id, deezer_track_id, multiplier, last_popularity, peak_popularity, accumulated_points'
+    )
     .eq('status', 'ativa')
 
   if (error) {
@@ -83,8 +86,11 @@ export async function runStakeSnapshot(logger?: {
     }
 
     const currentPop = popScore(rankRes.rank)
-    const { dayGain, pointsGain } = computePointsGain(
-      stake.last_popularity,
+    // Contra o pico, não contra ontem — ver migration 028. `last_popularity`
+    // continua sendo gravado (é o "agora" que o card mostra), mas quem decide
+    // se rendeu ponto é `peak_popularity`.
+    const { dayGain, pointsGain, newPeak } = computePointsGain(
+      stake.peak_popularity,
       currentPop,
       Number(stake.multiplier)
     )
@@ -102,6 +108,7 @@ export async function runStakeSnapshot(logger?: {
       .from('stakes')
       .update({
         last_popularity: currentPop,
+        peak_popularity: newPeak,
         last_day_gain: pointsGain,
         accumulated_points: stake.accumulated_points + pointsGain,
         last_checked_at: new Date().toISOString(),

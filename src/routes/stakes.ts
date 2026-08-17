@@ -100,7 +100,16 @@ export default async function stakeRoutes(app: FastifyInstance) {
         ...c,
         days_held: held,
         days_to_collect: Math.max(0, MIN_DAYS_TO_COLLECT - held),
-        can_collect: c.status === 'ativa' && held >= MIN_DAYS_TO_COLLECT,
+        // Espelha `collect_stake()` exatamente (migration 028). Antes faltava o
+        // `accumulated_points > 0` daqui: uma ficha parada há 7 dias vinha com
+        // can_collect true, o card acendia verde com "Recolher · 0 pts", e o
+        // clique caía no else do SQL — que APAGA a linha. O usuário achava que
+        // estava colhendo e jogava a posição fora.
+        // `removida` entra porque parar de medir não é perder o já medido.
+        can_collect:
+          (c.status === 'ativa' || c.status === 'removida') &&
+          held >= MIN_DAYS_TO_COLLECT &&
+          (c.accumulated_points ?? 0) > 0,
         pessoas_deram_stake: countByUri.get(c.track_uri) ?? 1,
         snapshots: snapsByStake.get(c.id) ?? [],
       }
@@ -120,7 +129,9 @@ export default async function stakeRoutes(app: FastifyInstance) {
       // Confere que o stake é do usuário (a RLS também protege, mas isto dá 404 limpo)
       const { data: stake, error: stakeErr } = await supabase
         .from('stakes')
-        .select('id, baseline_popularity, last_popularity, multiplier, staked_at')
+        .select(
+          'id, baseline_popularity, last_popularity, peak_popularity, multiplier, staked_at'
+        )
         .eq('id', id)
         .eq('user_id', request.user.id)
         .maybeSingle()
@@ -147,6 +158,7 @@ export default async function stakeRoutes(app: FastifyInstance) {
       return reply.send({
         baseline_popularity: stake.baseline_popularity,
         last_popularity: stake.last_popularity,
+        peak_popularity: stake.peak_popularity,
         multiplier: stake.multiplier,
         staked_at: stake.staked_at,
         snapshots: (snaps ?? []).map((s) => ({
@@ -260,6 +272,8 @@ export default async function stakeRoutes(app: FastifyInstance) {
           multiplier,
           accumulated_points: 0,
           last_popularity: baselinePopularity,
+          // marca d'água começa no baseline: só passar disso paga (migration 028)
+          peak_popularity: baselinePopularity,
           last_day_gain: 0,
           status: 'ativa',
           last_checked_at: new Date().toISOString(),

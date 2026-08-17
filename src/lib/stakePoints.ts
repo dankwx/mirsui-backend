@@ -41,17 +41,25 @@ export function computeMultiplier(artistFame: number, trackPopularity: number): 
 }
 
 /**
- * Pontos ganhos numa medição: só conta SUBIDA de popularidade.
- * Se a popularidade cair ou ficar igual, o ganho é 0 (nunca negativo).
+ * Pontos ganhos numa medição, medidos contra a MARCA D'ÁGUA (o maior popScore
+ * já atingido desde a ficha) — não contra a medição de ontem. Ver migration 028.
+ *
+ * A diferença importa: comparando com ontem, uma faixa que oscila paga a mesma
+ * subida a cada ciclo, e o acumulado vira "soma de todas as subidas" em vez de
+ * "o quanto ela subiu". Nos dados reais isso era 84 dos 103 pontos existentes.
+ * Contra o pico, só bater o próprio recorde paga; recuperar queda não.
+ *
+ * Continua nunca negativo: cair não tira ponto, `accumulated_points` só sobe.
  */
 export function computePointsGain(
-  previousPopularity: number,
+  peakPopularity: number,
   currentPopularity: number,
   multiplier: number
-): { dayGain: number; pointsGain: number } {
-  const dayGain = Math.max(0, currentPopularity - previousPopularity)
+): { dayGain: number; pointsGain: number; newPeak: number } {
+  const dayGain = Math.max(0, currentPopularity - peakPopularity)
   const pointsGain = Math.round(dayGain * multiplier)
-  return { dayGain, pointsGain }
+  const newPeak = Math.max(peakPopularity, currentPopularity)
+  return { dayGain, pointsGain, newPeak }
 }
 
 function clamp01to100(n: number): number {
