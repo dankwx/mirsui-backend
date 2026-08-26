@@ -890,7 +890,7 @@ mediu naquele dia, ou aquele ponto não existe*. Dizer "observando desde
 | 4 | ~~Cadência adaptativa por orçamento fixo~~ **feito (025), ainda sem efeito** | alto | **o que realmente destrava a escala** — mas 100% do catálogo é quente até ele envelhecer (ver 5.1) |
 | 5 | ~~ISRC via `/album/{id}/tracks` em vez de `/track/{id}`~~ **feito (024), ainda não medido** | médio | ~10x na etapa 4 — o ganho aparece na próxima fila (ver nota) |
 | 6 | ~~Medição em lote via `/artist/{id}/top`~~ **descartado (ver abaixo)** | alto | ~5x em catálogo grande |
-| 7 | ~~Reconsiderar `OBS_MAX_CATALOGO = 10.000`~~ **feito pela metade (26/08)** | 1 env | teto solto e catálogo em 15.635 — mas o orçamento de medição não veio junto, e a fila parou de drenar |
+| 7 | ~~Reconsiderar `OBS_MAX_CATALOGO = 10.000`~~ **feito, e fechado em 26/08** | 1 env + migration 031 | teto solto, catálogo em 15.635; o orçamento subiu para 40.000 e a fila voltou a drenar depois que o corte do PostgREST saiu — ver a revisão de 26/08 parte 2 |
 | 8 | ~~Playlists editoriais~~ → **descoberta por álbum (ADR 002)** | médio | 11,5x mais obscura, ISRC de graça |
 | 9 | ~~ISRC como identificador canônico (em vez de spotify_id)~~ **feito (023)** | alto | tirou o risco estrutural do Spotify; 1.388 → 6.490 páginas (4,67x) |
 
@@ -1102,6 +1102,134 @@ select cadence_band, count(*) from observed_tracks where active group by cadence
 ```
 
 ---
+
+---
+
+### Revisão de 26/08/2026, parte 2 — o problema 2 tinha uma causa, e não era nenhuma das hipóteses
+
+A revisão acima terminou dizendo *"o número que decide é `medidasIndividuais`
+contra `orcamentoMedicao` e `filaVencida` no log da última rodada, e ele não foi
+lido ainda"*. Estava certa sobre o método, e o log de fato respondia — mas o
+campo `adiadas`, ao lado, teria mandado para o lugar errado. As duas coisas
+foram consertadas.
+
+**A causa: o PostgREST cortava a fila em 1.000 linhas.**
+
+`catalogSnapshot.ts` lia a fila da etapa 3 por `db.rpc()` direto. `db.rpc()` vai
+por PostgREST, e PostgREST corta TODA resposta em `db-max-rows` antes de ela
+chegar ao processo. O `limit p_limite` de dentro da função não protege disso —
+ele roda no Postgres, e o corte acontece depois. Medido em produção, no mesmo
+RPC:
+
+| caminho | linhas |
+|---|---|
+| PostgREST, `p_limite = 12000` | **1.000** |
+| PostgREST, `p_limite = 40000` | **1.000** |
+| SQL direto, `count(*) from observatory_measurement_queue(12000)` | **10.726** |
+
+O `OBS_ORCAMENTO_MEDICAO` nunca chegou a valer nada. **O teto real da etapa 3
+era 1.000 faixas por noite, indiferente ao orçamento**, desde a migration 025 —
+que trocou `lerFila()` por `db.rpc()` e tirou a paginação junto, com o argumento
+registrado em comentário de que o `limit` de dentro a substituía.
+
+**A prova, decompondo a rodada de 26/08.** Ela durou **4 min 11 s** (05:00:14 a
+05:04:25): não faltou janela, não faltou rate limit — ela acabou. As 12 escritas
+em lote, as mesmas 12 chamadas a `record_observations` que o log do Supabase já
+mostrava, reconciliam as 4.909 exatamente:
+
+| etapa | lotes (BRT) | faixas |
+|---|---|---|
+| 1 — chart | 05:00:14–17 | 2.476 |
+| **3 — medição individual** | 05:00:56, 05:01:28, 05:02:00, 05:02:32 | **997** |
+| 4 — ISRC por álbum | 05:03:04, 05:03:21 | 372 |
+| descoberta (inserções novas) | 05:03:52, 05:04:25 | 1.064 |
+| | **total** | **4.909** |
+
+A etapa 3 são 4 blocos de `BLOCO = 250`, menos 3 faixas que o Deezer não
+respondeu (`desativadas = 0` no dia, então não é faixa que sumiu). Os ~32 s por
+bloco batem com `INTERVALO_MS = 125` — 8 req/s, exatamente como projetado: **o
+cliente Deezer estava saudável, ele só recebeu 1.000 faixas para medir.**
+
+E as 1.064 da descoberta são as mesmas 1.064 de `cadence_band` nulo da tabela
+acima: faixa nova nasce com `last_checked_at` preenchido, então entrava na
+contagem de "medidas" sem ter sido medida. Um sétimo do número que abriu esta
+investigação não era medição.
+
+**O segundo defeito, e é ele que fez isso durar sete dias.** `adiadas` era
+`filaVencida - orcamentoMedicao`: calculado contra o orçamento, não contra o que
+foi medido. Na noite de 26/08 o log relatou ~2.571 adiadas (14.571 − 12.000)
+quando o buraco real era **13.574** (14.571 − 997). O campo que existe para o
+corte nunca ser silencioso estava, ele mesmo, apontando para o problema 1 e
+escondendo o problema 2. (`filaVencida` sempre disse a verdade: vem de
+`observatory_queue_size()`, que devolve um escalar, e o corte do PostgREST é por
+linha.)
+
+**O que foi feito**
+
+1. **`db-max-rows` de 1.000 para 20.000** no painel do Supabase. Destrava hoje e
+   volta a cortar quando o catálogo passar disso — não é a correção, é o
+   analgésico. Com a paginação de volta ele pode voltar a 1.000: `lerFila()`
+   pagina de 1.000 em 1.000, e o teto só precisa ser maior ou igual à página.
+2. **Migration 031** — ordem total na `observatory_measurement_queue`. Paginar
+   por `.range()` exige ordenação determinística, e a ordenação da 025 terminava
+   em `last_checked_at`: medido, **10.725 das 10.726 linhas da fila estavam em
+   grupos de empate, o maior com 808**. Sem desempate pela PK, duas páginas do
+   mesmo empate repetem e pulam linha. O índice da fila foi estendido junto,
+   para a ordenação continuar coberta.
+3. **A paginação de volta na etapa 3**, reusando o `lerFila()` que as etapas 2 e
+   4 nunca deixaram de usar.
+4. **`filaLida`, um campo novo no log.** Tem que ser `min(filaVencida,
+   orcamento)`; se vier menos, alguma camada cortou no caminho, e agora sai um
+   `log.warn` dizendo isso. É o instrumento que faltava — não o `adiadas`, que
+   media a intenção, mas a diferença entre o que foi pedido e o que chegou.
+5. **`adiadas` corrigido** para `filaVencida - medidasIndividuais`, calculado
+   depois da medição. Passa a incluir o que o Deezer não respondeu, que também
+   continua vencido.
+
+**Três outros cortes silenciosos da mesma família, achados na varredura:**
+
+- `catalogDiscovery.ts` — `lerTodosIds()` paginava **sem `order by` nenhum**. O
+  Postgres não promete ordem entre duas execuções, e cada página é uma
+  requisição separada: as 16 páginas de hoje podiam repetir e pular id. Um id
+  pulado sai do `Set` de conhecidas e a descoberta gasta requisição no Deezer
+  para reinserir o que já existe. Corrigido com ordem pela PK.
+- `catalogSnapshot.ts` etapa 4 — paginava por `added_at`, que tem grupos enormes
+  de linhas idênticas: a descoberta insere ~1.000 faixas numa transação só e
+  todas ficam com o mesmo timestamp. **Maior empate medido: 1.032 linhas, maior
+  que a página de 1.000.** Latente hoje, com a fila em 297; certo de explodir
+  quando ela passar de mil. Corrigido com desempate pela PK.
+- `stakeSnapshot.ts` — lia os stakes ativos sem paginação e sem ordem.
+  Inofensivo enquanto os stakes couberem em `db-max-rows`, e exatamente a mesma
+  classe de defeito. Paginado.
+
+**Verificação** (26/08/2026, produção, depois da 031):
+
+```
+orcamentoMedicao : 40000
+filaVencida      : 10726
+filaLida         : 10726     <- era 1000
+esperado         : 10726
+ids distintos    : 10726  | repetidos: 0
+leitura          : 11 requisições, 2,7 s
+```
+
+**O que esperar da próxima rodada.** ~15.600 vencidas, das quais o chart resolve
+2.476 de graça na etapa 1 e que saem da fila sozinhas; a etapa 3 mede as ~13.200
+restantes em **~28 min** a 8 req/s. O orçamento de 40.000 não corta nada.
+
+**Quando 40.000 volta a ser o teto.** A `OBS_MAX_CATALOGO = 100.000` e a 1.100
+faixas/dia, o catálogo bate no teto por volta de **11/11/2026**. Lá, com a banda
+quente estabilizada em ~33.000 (30 dias × 1.100) e o resto dividido entre morna
+e fria, o custo diário fica em ~38.700 requisições — ~81 min, dentro da janela,
+e logo abaixo do orçamento. Os três botões finalmente estão dimensionados uns
+para os outros. O que muda essa conta é `OBS_LIMITE_DESCOBERTA`: cada +1.000 por
+noite são +30.000 de banda quente permanente.
+
+**A lição de método, porque ela custou uma semana.** Todo campo do log media
+*intenção* — o orçamento configurado, a fila que existia, a conta entre os dois.
+Nenhum media a *entrega*: quantas linhas realmente chegaram. Entre um número que
+você escolheu e um número que você observou sempre pode haver uma camada
+cortando, e é a diferença entre os dois que precisa estar no log.
 
 ## 10. Adições — fontes complementares (não discutidas antes)
 

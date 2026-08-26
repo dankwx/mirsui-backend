@@ -207,6 +207,12 @@ async function lerTodosIds(db: SupabaseClient): Promise<string[]> {
     const { data, error } = await db
       .from('observed_tracks')
       .select('deezer_track_id')
+      // Ordem explícita, e pela PK. Sem order by o Postgres não promete ordem
+      // nenhuma ENTRE duas execuções, e cada página aqui é uma requisição
+      // separada — as 16 páginas de hoje podiam repetir e pular id à vontade.
+      // Um id que a paginação pula sai deste Set, e a descoberta trata a faixa
+      // como nova: gasta requisição no Deezer para reinserir o que já existe.
+      .order('deezer_track_id', { ascending: true })
       .range(offset, offset + pagina - 1)
 
     if (error) throw error

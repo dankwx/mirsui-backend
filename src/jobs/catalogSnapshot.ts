@@ -96,9 +96,22 @@ export interface ResultadoObservatorio {
   /** quantas faixas estavam vencidas — se passar do orçamento, sobra fila */
   filaVencida: number
   /**
-   * Faixas vencidas que o orçamento não alcançou. Existe para o corte NUNCA ser
-   * silencioso: elas continuam vencidas e voltam no topo da fila amanhã, mas
-   * um número teimosamente alto aqui significa orçamento pequeno demais para o
+   * Quantas linhas a leitura da fila REALMENTE trouxe. Tem que ser igual a
+   * min(filaVencida, orcamentoMedicao); se for menos, alguma camada cortou no
+   * caminho. Existe porque entre a 025 e a 031 o PostgREST cortava a fila em
+   * 1.000 linhas e NENHUM campo do log mostrava a diferença — o orçamento dizia
+   * 12.000, a fila vencida dizia 14.571, e a etapa media 997.
+   */
+  filaLida: number
+  /**
+   * Faixas vencidas que CONTINUAM vencidas depois da rodada: as que o orçamento
+   * não alcançou, mais as que o Deezer não respondeu. Contado contra
+   * medidasIndividuais e não contra o orçamento — até a 031 era
+   * `filaVencida - orcamentoMedicao`, que na noite de 26/08/2026 relatou ~2.571
+   * quando o buraco real era 13.574. O campo existia para o corte não ser
+   * silencioso e estava, ele mesmo, escondendo o corte.
+   *
+   * Um número teimosamente alto aqui significa orçamento pequeno demais para o
    * catálogo — é o sinal de subir OBS_ORCAMENTO_MEDICAO ou esfriar as bandas.
    */
   adiadas: number
@@ -159,6 +172,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     bandas: {},
     orcamentoMedicao: 0,
     filaVencida: 0,
+    filaLida: 0,
     adiadas: 0,
     isrcPreenchidos: 0,
     isrcRequisicoesDeAlbum: 0,
@@ -612,17 +626,41 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
 
     // Quantas estavam vencidas ANTES do corte. É isto que impede o orçamento de
     // ser um teto silencioso — o defeito que o comentário de num() nomeia.
+    // Devolve um ESCALAR, e por isso nunca foi truncado: o corte do PostgREST é
+    // por linha. Foi o que fez `filaVencida` continuar dizendo a verdade
+    // enquanto a fila ao lado dela vinha pela metade.
     const { data: tamanhoFila, error: errTamanho } = await db.rpc('observatory_queue_size')
     if (errTamanho) throw errTamanho
     resultado.filaVencida = Number(tamanhoFila) || 0
-    resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.orcamentoMedicao)
 
-    const { data: fila, error: errFila } = await db.rpc('observatory_measurement_queue', {
-      p_limite: resultado.orcamentoMedicao,
-    })
-    if (errFila) throw errFila
+    // PAGINADA, e não `db.rpc(...)` direto. O `limit p_limite` de DENTRO da
+    // função não substitui o `.range()` de FORA: db.rpc() vai por PostgREST, e
+    // PostgREST corta toda resposta em db-max-rows antes de ela chegar ao
+    // processo. Entre a 025 e a 031 isso prendeu a etapa 3 em 1.000 faixas por
+    // noite com um orçamento de 12.000, todas as noites, sem erro nenhum.
+    // A ordem total que a paginação exige está na migration 031.
+    const vencidas = await lerFila<LinhaObservada & { cadence_band: string | null }>(
+      () => db.rpc('observatory_measurement_queue', { p_limite: resultado.orcamentoMedicao }),
+      resultado.orcamentoMedicao
+    )
+    resultado.filaLida = vencidas.length
 
-    const vencidas = (fila ?? []) as (LinhaObservada & { cadence_band: string | null })[]
+    // O guarda que faltava. A leitura tem que trazer o menor entre o que estava
+    // vencido e o orçamento; menos que isso é alguma camada cortando no caminho,
+    // e isso não pode voltar a ser silencioso.
+    const esperado = Math.min(resultado.filaVencida, resultado.orcamentoMedicao)
+    if (resultado.filaLida < esperado) {
+      log.warn?.(
+        {
+          esperado,
+          lida: resultado.filaLida,
+          filaVencida: resultado.filaVencida,
+          orcamento: resultado.orcamentoMedicao,
+        },
+        'Observatório: fila truncada na leitura — veio menos que a fila vencida e que o orçamento'
+      )
+    }
+
     const candidatas = vencidas.filter((r) => !vistasHoje.has(r.deezer_track_id))
 
     // Em que bandas o orçamento foi gasto. É a composição da FILA, não o
@@ -640,10 +678,14 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       await desativar(sumiram)
     })
 
+    // Depois da medição, e contra o que foi medido. Ver o comentário do campo.
+    resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.medidasIndividuais)
+
     log.info(
       {
         orcamento: resultado.orcamentoMedicao,
         filaVencida: resultado.filaVencida,
+        filaLida: resultado.filaLida,
         medidas: resultado.medidasIndividuais,
         filaPorBanda,
         adiadas: resultado.adiadas,
@@ -683,7 +725,14 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
           .eq('active', true)
           .is('isrc', null)
           .is('isrc_checked_at', null)
-          .order('added_at', { ascending: true }),
+          // Desempate pela PK. added_at tem grupos enormes de linhas idênticas
+          // — a descoberta insere ~1.000 faixas numa transação só, e todas ficam
+          // com o mesmo timestamp. Medido em 26/08/2026: o maior grupo tem 1.032
+          // linhas, MAIOR que a página de lerFila(). Um empate que atravessa a
+          // fronteira da página faz o .range() repetir e pular faixa, que é o
+          // mesmo defeito que a 031 tirou da fila da etapa 3.
+          .order('added_at', { ascending: true })
+          .order('deezer_track_id', { ascending: true }),
       limiteIsrc
     )
 

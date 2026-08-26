@@ -30,16 +30,32 @@ export async function runStakeSnapshot(logger?: {
     return { processed: 0, removed: 0, skipped: 0 }
   }
 
-  const { data: stakes, error } = await supabaseAdmin
-    .from('stakes')
-    .select(
-      'id, deezer_track_id, multiplier, last_popularity, peak_popularity, accumulated_points'
-    )
-    .eq('status', 'ativa')
+  // Paginado. Uma leitura sem .range() volta cortada em db-max-rows do
+  // PostgREST — sem erro, sem aviso, e o job simplesmente deixa de creditar os
+  // stakes que ficaram de fora. Hoje são poucos e o corte nunca bateu; foi
+  // exatamente assim que a etapa 3 do Observatório passou uma semana medindo
+  // 1.000 faixas com orçamento de 12.000. Ordem pela PK porque a paginação
+  // exige ordem total. Ver migration 031.
+  const PAGINA = 1_000
+  const stakes: StakeRow[] = []
+  for (let offset = 0; ; offset += PAGINA) {
+    const { data, error } = await supabaseAdmin
+      .from('stakes')
+      .select(
+        'id, deezer_track_id, multiplier, last_popularity, peak_popularity, accumulated_points'
+      )
+      .eq('status', 'ativa')
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGINA - 1)
 
-  if (error) {
-    log.error({ err: error }, 'Erro ao carregar stakes ativos')
-    return { processed: 0, removed: 0, skipped: 0 }
+    if (error) {
+      log.error({ err: error }, 'Erro ao carregar stakes ativos')
+      return { processed: 0, removed: 0, skipped: 0 }
+    }
+
+    const lote = (data ?? []) as StakeRow[]
+    stakes.push(...lote)
+    if (lote.length < PAGINA) break
   }
 
   let processed = 0
@@ -48,7 +64,7 @@ export async function runStakeSnapshot(logger?: {
 
   const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
 
-  for (const stake of (stakes ?? []) as StakeRow[]) {
+  for (const stake of stakes) {
     // Idempotência: se já houve snapshot hoje, não conta de novo
     const { count: snapsToday } = await supabaseAdmin
       .from('stake_snapshots')
