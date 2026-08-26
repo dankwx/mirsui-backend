@@ -1,6 +1,11 @@
 # Análise de escala — limites de API e crescimento do banco
 
 - **Data:** 15 de agosto de 2026
+- **Leia primeiro:** a
+  [revisão de 26/08/2026](#revisão-de-26082026--o-item-7-foi-executado-pela-metade),
+  no fim da seção 9. O item 7 saiu, o catálogo dobrou, e a fila de medição
+  parou de drenar. Os números de "estado atual" abaixo são de 15/08 e estão
+  todos defasados por um fator de ~2,4.
 - **Status** (marcação revista em 16/08/2026, segunda revisão): **itens 2, 3, 4,
   5 e 9 aplicados em produção**; **itens 1 e 6 descartados** por medição, não por
   esforço (ver 4.6 e a revisão na seção 9); **item 7 é uma decisão com prazo —
@@ -885,7 +890,7 @@ mediu naquele dia, ou aquele ponto não existe*. Dizer "observando desde
 | 4 | ~~Cadência adaptativa por orçamento fixo~~ **feito (025), ainda sem efeito** | alto | **o que realmente destrava a escala** — mas 100% do catálogo é quente até ele envelhecer (ver 5.1) |
 | 5 | ~~ISRC via `/album/{id}/tracks` em vez de `/track/{id}`~~ **feito (024), ainda não medido** | médio | ~10x na etapa 4 — o ganho aparece na próxima fila (ver nota) |
 | 6 | ~~Medição em lote via `/artist/{id}/top`~~ **descartado (ver abaixo)** | alto | ~5x em catálogo grande |
-| 7 | Reconsiderar `OBS_MAX_CATALOGO = 10.000` | 1 env | **prazo correndo, ver abaixo** |
+| 7 | ~~Reconsiderar `OBS_MAX_CATALOGO = 10.000`~~ **feito pela metade (26/08)** | 1 env | teto solto e catálogo em 15.635 — mas o orçamento de medição não veio junto, e a fila parou de drenar |
 | 8 | ~~Playlists editoriais~~ → **descoberta por álbum (ADR 002)** | médio | 11,5x mais obscura, ISRC de graça |
 | 9 | ~~ISRC como identificador canônico (em vez de spotify_id)~~ **feito (023)** | alto | tirou o risco estrutural do Spotify; 1.388 → 6.490 páginas (4,67x) |
 
@@ -999,6 +1004,102 @@ Armazenamento: a §5.4 projeta ~17 MB/ano para 10k faixas depois do delta; 40k d
 **Ordem que sobra:** 7 (+ os três botões acima, é uma decisão só) → aplicar a 026
 → ler `discovery_source_report()` em ~60 dias e ajustar
 `OBS_DESCOBERTA_SPLIT_ALBUM`.
+
+---
+
+### Revisão de 26/08/2026 — o item 7 foi executado pela metade
+
+O item 7 saiu, e saiu **no ambiente, não no código**:
+`CONFIG_DESCOBERTA_PADRAO` (`src/jobs/catalogDiscovery.ts:110`) continua com
+`maxCatalogo: 10_000` e `limiteDiario: 250`. Quem está mandando são as envs, e é
+por isso que este documento não tinha como saber — a marcação de status de
+16/08 ficou desatualizada sem que nenhum commit a contradissesse.
+
+Medido no banco de produção em 26/08:
+
+```
+faixas ativas          15.635      (eram 6.490 em 15/08 — 2,41x)
+crescimento            ~1.100/dia  (era 250/dia no padrão do código)
+```
+
+**Funcionou.** O que não veio junto foi o terceiro botão, e a §9 acima já tinha
+escrito exatamente o que aconteceria:
+
+> *"1.000/noite significa ~30.000 faixas permanentemente quentes contra
+> `OBS_ORCAMENTO_MEDICAO = 12.000`. A fila nunca drenaria."*
+
+Nunca drenou. A medição:
+
+| | |
+|---|---|
+| faixas ativas | 15.635 |
+| na banda `quente` (cadência de 1 dia) | 14.571 |
+| com `cadence_band` nulo — que a etapa 3 trata como quente (`catalogSnapshot.ts:633`) | 1.064 |
+| **medidas na rodada de 26/08** | **4.909** |
+| há mais de 3 dias sem medição | **6.285** |
+| medição mais antiga do catálogo ativo | **19/08 — 7 dias** |
+
+Distribuição de `last_checked_at`, que é a forma mais direta de ver a fila
+represada:
+
+```
+26/08   4.909      <- a rodada de hoje
+25/08   2.453
+24/08   1.988
+23/08   1.868
+22/08   1.108
+21/08     856
+20/08   2.179
+19/08     274
+```
+
+O `adiadas` do log noturno deve estar perto de 9.600. Ele existe justamente para
+o corte não ser silencioso (`catalogSnapshot.ts:98`) — e não foi: ninguém leu.
+
+**São dois problemas, não um.** É importante separá-los porque a correção é
+diferente:
+
+1. **O orçamento é pequeno para o catálogo.** 12.000 contra ~15.600 vencidas por
+   noite. Correção: `OBS_ORCAMENTO_MEDICAO` para ~40.000, como a §9 já
+   recomendava, ou esfriar as bandas.
+2. **Nem os 12.000 estão sendo alcançados.** A rodada mediu 4.909, que é 41% do
+   orçamento vigente. O orçamento não é o teto que está cortando — alguma outra
+   coisa é: a janela noturna, o intervalo entre requisições
+   (`INTERVALO_MS` em `src/lib/deezerCatalog.ts`), a etapa de descoberta comendo
+   o tempo, ou falha parcial. **Subir o orçamento sem descobrir isto não resolve
+   nada** — o número que decide é `medidasIndividuais` contra `orcamentoMedicao`
+   e `filaVencida` no log da última rodada, e ele não foi lido ainda.
+
+**O custo real não é banco, é produto.** A §5.4 projeta ~70 MB/ano de
+armazenamento para 40k faixas: irrelevante. O que se perde é a curva — dois
+terços do catálogo com buraco de 3 a 7 dias entre pontos. E curva é exatamente a
+régua que o §10 do
+[plano de URLs do frontend](../../Mirsui/docs/plano-de-urls-e-seo.md) define como
+condição para indexar: *"sitemap só quando houver o que indexar"*. Crescer o
+catálogo sem medi-lo produz mais páginas fracas, que é o oposto do que aquele
+documento pede.
+
+**Ordem, revisada de novo:** ler o log da rodada (problema 2) → só então
+`OBS_ORCAMENTO_MEDICAO` (problema 1) → `discovery_source_report()` em ~60 dias.
+Enquanto o problema 2 estiver aberto, subir `OBS_LIMITE_DESCOBERTA` de novo é
+piorar de propósito.
+
+Uma nota de método, porque custou tempo: nada disto aparece no log do Supabase.
+Os crons do backend fizeram **12 requisições** a `record_observations` em 24h — é
+grande e em lote, como deve ser. O estado da fila só se vê consultando
+`observed_tracks` diretamente:
+
+```sql
+select
+  count(*) filter (where active) as ativas,
+  count(*) filter (where active and last_checked_at > now() - interval '24 hours') as medidas_24h,
+  count(*) filter (where active and (last_checked_at < now() - interval '3 days'
+                                     or last_checked_at is null)) as atrasadas_3d,
+  min(last_checked_at) filter (where active) as mais_antiga
+from observed_tracks;
+
+select cadence_band, count(*) from observed_tracks where active group by cadence_band;
+```
 
 ---
 

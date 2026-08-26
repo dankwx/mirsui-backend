@@ -36,7 +36,10 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | `OBS_DESCOBERTA_ATIVA` | Não | Liga a descoberta diária (padrão: `true`) |
 | `OBS_DESCOBERTA_META_INICIAL` | Não | Meta da expansão inicial do catálogo (padrão: `6604`) |
 | `OBS_LIMITE_DESCOBERTA` | Não | Novas faixas por dia depois da meta inicial (padrão: `250`) |
-| `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`). Vale só para a descoberta — faixa que entra por chart não passa por ele |
+| `OBS_MAX_CATALOGO` | Não | Teto rígido de faixas ativas no Observatório (padrão: `10000`). Vale só para a descoberta — faixa que entra por chart não passa por ele. **Não anda sozinho: subir este sem subir `OBS_ORCAMENTO_MEDICAO` faz a fila de medição parar de drenar** — ver a revisão de 26/08 na [análise de escala](docs/analise-escala-apis-e-banco.md) |
+| `OBS_ORCAMENTO_MEDICAO` | Não | Teto de requisições da etapa 3, a medição do catálogo (padrão: `12000`). **É o mecanismo, não um freio de emergência**: quando a fila vencida passa dele, o resto fica para amanhã e volta como `adiadas` no log. Um `adiadas` teimosamente alto significa orçamento pequeno demais para o tamanho do catálogo |
+| `OBS_CADENCIA_MORNA` / `OBS_CADENCIA_FRIA` | Não | De quantos em quantos dias a faixa morna e a fria são medidas (padrão: `7` e `14`). A fria manda na conta: é ~70% da massa num catálogo maduro |
+| `OBS_JANELA_MOVIMENTO` / `OBS_JANELA_NOVIDADE` | Não | Em dias, o que mantém uma faixa quente: ter mudado de rank, ou ter entrado no catálogo (padrão: `30` para as duas). Faixa nova nasce quente por 30 dias — é por isso que um catálogo jovem é 100% quente |
 | `OBS_LIMITE_CHART` | Não | Faixas pedidas por chart de gênero (padrão: `300`, que é o teto do endpoint). Baixar reduz a rodada e o crescimento do catálogo |
 | `OBS_DESCOBERTA_SPLIT_ALBUM` | Não | Fração do orçamento da descoberta que vai para a caminhada por álbum (padrão: `0.7`). `0` volta ao comportamento só-rádio do ADR 001 |
 | `OBS_DESCOBERTA_MAX_FAS` | Não | Teto de fãs para um artista entrar na fronteira da caminhada (padrão: `50000`). É o dial de obscuridade |
@@ -59,6 +62,13 @@ busca — enriquecimento, não requisito. Ver
   (que é o endereço das páginas do site) e, por último, descobre faixas
   semelhantes pelo rádio de artista do Deezer. A primeira expansão tenta chegar
   a 6.604 faixas; depois cresce no máximo 250 por dia, até 10 mil.
+
+  **Esses são os padrões do código, e a produção não está neles.** Medido em
+  26/08/2026: **15.635 faixas ativas, crescendo ~1.100/dia** — as envs foram
+  subidas sem que nenhum commit registrasse. E a medição não acompanhou: 4.909
+  faixas medidas na rodada, 6.285 com mais de 3 dias sem medição. Antes de mexer
+  em qualquer `OBS_*`, ler a revisão de 26/08 em
+  [`docs/analise-escala-apis-e-banco.md`](docs/analise-escala-apis-e-banco.md).
 
   A etapa que resolvia ISRC → id do Spotify **saiu da rodada**: eram 2.027
   buscas por noite, era a parte que mais falhava e escalava com o tamanho do
