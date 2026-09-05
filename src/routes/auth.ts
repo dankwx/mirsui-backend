@@ -10,9 +10,6 @@ import { emailKey } from '../lib/rateLimitKeys'
 // Ver src/lib/rateLimitKeys.ts.
 const perEmail = { hook: 'preValidation' as const, keyGenerator: emailKey }
 
-const DEFAULT_AVATAR_URL =
-  'https://tqprioqqitimssshcrcr.supabase.co/storage/v1/object/public/user-profile-images/default.jpg'
-
 // Formato mínimo de email — quem valida de verdade é o GoTrue. Aqui é só pra
 // não deixar string arbitrária entrar em log nem virar trabalho à toa.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -110,10 +107,24 @@ export default async function authRoutes(app: FastifyInstance) {
       email,
       password,
       options: {
+        // Sem `avatar_url`: o trigger faz `raw_user_meta_data ->> 'avatar_url'`,
+        // que vira NULL quando a chave não existe, e NULL é o que liga o
+        // fallback de inicial no frontend (components/FotoDePerfil.tsx).
+        //
+        // Aqui morava uma URL fixa para `user-profile-images/default.jpg` no
+        // projeto da nuvem. Esse projeto está restrito por cota desde a
+        // migração e responde 402 em TODA leitura, então cada conta criada por
+        // email nascia apontando para uma imagem morta — e a home, que é
+        // renderizada no servidor, mandava essa URL no HTML. O cadastro por
+        // Google já entrava sem estes campos e sempre funcionou; é esse o
+        // caminho que o de email passa a seguir.
+        //
+        // Um JPG genérico hospedado não volta nem quando os bytes forem
+        // resgatados: a inicial desenhada é o fallback do produto, e ela não
+        // depende de rede nenhuma.
         data: {
           username,
-          display_name: generateRandomDisplayName(),
-          avatar_url: DEFAULT_AVATAR_URL
+          display_name: generateRandomDisplayName()
         }
       }
     })
