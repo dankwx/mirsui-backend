@@ -2,6 +2,7 @@ import cron from 'node-cron'
 import { buildApp } from './app'
 import { runStakeSnapshot } from './jobs/stakeSnapshot'
 import { runCatalogSnapshot } from './jobs/catalogSnapshot'
+import { pingHealthcheck } from './lib/healthcheck'
 
 const port = Number(process.env.PORT) || 3000
 
@@ -12,9 +13,14 @@ const app = await buildApp()
 cron.schedule(
   '0 9 * * *',
   () => {
-    runStakeSnapshot(app.log).catch((err) =>
-      app.log.error({ err }, 'Falha no job de snapshot dos stakes')
-    )
+    const hc = process.env.HC_STAKES_URL
+    void pingHealthcheck(hc, '/start')
+    runStakeSnapshot(app.log)
+      .then(() => pingHealthcheck(hc))
+      .catch((err) => {
+        app.log.error({ err }, 'Falha no job de snapshot dos stakes')
+        return pingHealthcheck(hc, '/fail')
+      })
   },
   { timezone: 'America/Sao_Paulo' }
 )
@@ -37,8 +43,16 @@ cron.schedule(
       return
     }
     observatorioRodando = true
+    // O "pulando" acima não pinga nada: um dia sem rodada é exatamente o que
+    // o healthchecks tem que apontar.
+    const hc = process.env.HC_OBSERVATORIO_URL
+    void pingHealthcheck(hc, '/start')
     runCatalogSnapshot(app.log)
-      .catch((err) => app.log.error({ err }, 'Falha no job do Observatório'))
+      .then(() => pingHealthcheck(hc))
+      .catch((err) => {
+        app.log.error({ err }, 'Falha no job do Observatório')
+        return pingHealthcheck(hc, '/fail')
+      })
       .finally(() => {
         observatorioRodando = false
       })
