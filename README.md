@@ -29,6 +29,7 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | Variável | Obrigatória | Descrição |
 |---|---|---|
 | `SUPABASE_URL` | Sim | URL do projeto Supabase |
+| `SUPABASE_PUBLIC_URL` | Não | Host do Supabase que o navegador alcança (`https://db.mirsui.com`). Na VPS `SUPABASE_URL` é loopback, e sem esta as URLs de avatar nasceriam com `127.0.0.1` |
 | `SUPABASE_KEY` | Sim | Chave do Supabase. **Obs:** `POST /auth/logout` usa `auth.admin.signOut()`, que exige a service role key — com a anon key o logout no servidor falha silenciosamente (o cliente ainda recebe sucesso) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Sim em produção | Chave privada usada exclusivamente pelos jobs do Observatório e dos Stakes; nunca vai para o frontend |
 | `FRONTEND_URL` | Não | Origem extra permitida no CORS e destino padrão do link de reset de senha |
@@ -46,6 +47,9 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | `OBS_DESCOBERTA_RELACIONADOS` | Não | Artistas que cada semente contribui à fronteira (padrão: `3`) |
 | `OBS_DESCOBERTA_FRONTEIRA_MIN` | Não | Abaixo disto a fronteira é reabastecida com sementes do catálogo (padrão: `50`) |
 | `OBS_DESCOBERTA_ALBUNS_POR_ARTISTA` | Não | Álbuns colhidos por artista por noite (padrão: `6`) |
+| `SEED_IMAGENS_DIR` | Não | Pasta com os JPEGs para os perfis semeados (padrão: `/home/ubuntu/imagens`). Foto usada é movida para `usadas/` dentro dela — nunca repete |
+| `OPENROUTER_API_KEY` | Só para `seed:perfis`/`seed:ia` | Chave do OpenRouter que escolhe as faixas e escreve a bio dos perfis semeados |
+| `OPENROUTER_MODEL` | Não | Modelo no OpenRouter (padrão: `tencent/hy4-preview` — ~US$ 0,0004 por perfil com o raciocínio desligado) |
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
 
@@ -86,6 +90,37 @@ A descoberta é idempotente por semente, não marca falhas transitórias como
 concluídas e grava faixa, histórico e linhagem na mesma transação. A decisão,
 os motivos e o procedimento de desligamento estão em
 [`docs/decisions/001-descoberta-controlada-de-faixas.md`](docs/decisions/001-descoberta-controlada-de-faixas.md).
+
+### Semeadura de perfis
+
+Perfis semeados para povoar o site — username real do Last.fm levemente
+alterado, foto do acervo, 1–3 fichas por IA, bio curta — todos marcados no banco
+(`auth.users.raw_app_meta_data->>'seeded'`, e-mail `@seed.mirsui.invalid`, tabela
+`seeded_profiles`) para que a limpeza seja um `DELETE` só. Plano completo em
+`~/mirsui-web/docs/plano-semeadura-de-perfis.md`; migration em
+`migrations/033_perfis_semeados.sql`.
+
+```bash
+npm run seed:usernames -- --paginas 5   # colhe handles no Last.fm → seed/usernames.json (gitignored)
+npm run seed:ia -- --n 5                # ensaio da IA, sem banco: brief, faixas, bio e tokens por chamada
+npm run seed:perfis -- --n 20           # cria 20 perfis (conta, data no passado, foto, fichas, bio, follows)
+```
+
+Depois de criados, o painel `/admin/perfis` do site lista os semeados e troca a
+foto de quem saiu estranho. Como usar, como apagar um e **como limpar tudo**
+está em [`docs/semeadura.md`](docs/semeadura.md).
+
+A IA (`src/seed/openrouter.ts`) recebe um brief sorteado por perfil — dois
+gêneros, década, idioma, e um ou dois traços que mudam de eixo (signo, MBTI,
+idade, cidade, ocupação, mania…) — mais a lista das últimas 60 faixas do lote
+como "não repita". A bio, quando existe (~60%), sai de um estilo e de um assunto
+sorteados (frase de filme, gíria de internet, só emoji, status de MSN…) e é
+proibida de citar qualquer coisa do brief. As faixas são resolvidas no Deezer
+com um casamento frouxo de artista/título; o que não casa é pulado.
+
+O Last.fm devolve `406 Rate Limited` a partir de ~10 requisições por minuto: o
+script anda a 5–9 s por requisição e, num 406, espera 3 min e tenta a mesma
+página de novo. Rodar de novo soma ao arquivo; nada é perdido.
 
 ## Estrutura do projeto
 

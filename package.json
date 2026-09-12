@@ -10,6 +10,9 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "observatorio": "tsx src/scripts/runCatalogSnapshot.ts",
+    "seed:usernames": "tsx src/scripts/coletarUsernames.ts",
+    "seed:perfis": "tsx src/scripts/semearPerfis.ts",
+    "seed:ia": "tsx src/scripts/testarIA.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },

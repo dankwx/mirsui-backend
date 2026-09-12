@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify'
-import { supabase, supabaseForUser, supabaseAdmin, Profile } from '../lib/supabase'
+import { supabase, supabaseForUser, supabaseAdmin, urlPublicaDoStorage, Profile } from '../lib/supabase'
 import { extractToken, getOptionalUser, requireAuth } from '../plugins/auth'
 
 const AVATAR_BUCKET = 'user-profile-images'
@@ -355,7 +355,7 @@ export default async function profileRoutes(app: FastifyInstance) {
     } = supabaseAdmin.storage.from(AVATAR_BUCKET).getPublicUrl(filePath)
 
     // cache-bust pra que o app recarregue a imagem nova (URL do arquivo é fixa)
-    const versionedUrl = `${publicUrl}?v=${Date.now()}`
+    const versionedUrl = `${urlPublicaDoStorage(publicUrl)}?v=${Date.now()}`
 
     const { data, error: updateError } = await supabaseAdmin
       .from('profiles')

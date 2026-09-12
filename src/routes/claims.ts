@@ -1,28 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { supabaseForUser } from '../lib/supabase'
 import { requireAuth } from '../plugins/auth'
-
-const ISRC_RE = /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/
-
-/**
- * O filtro que identifica uma GRAVAÇÃO, e não uma string.
- *
- * `track_uri` é uma chave opaca e continua sendo: as linhas antigas guardam
- * `spotify:track:<id>` e migrá-las seria risco alto no único dado
- * insubstituível do produto (ver docs/plano-independencia-do-spotify.md §7).
- * O que existe agora é `tracks.isrc` ao lado — preenchida no save e
- * retroativamente pela ponte do Observatório (migration 023).
- *
- * Com as duas, a mesma faixa salva por caminhos diferentes (uri do Spotify
- * antes, `isrc:<ISRC>` depois) conta no mesmo lugar, em vez de virar dois
- * contadores paralelos e duas "primeiras pessoas a salvar".
- *
- * Nem o ISRC ([A-Z0-9]{12}) nem as duas formas de uri têm vírgula, então nada
- * aqui precisa de escape para a sintaxe do `.or()` do PostgREST.
- */
-function filtroDaGravacao(trackUri: string, isrc: string | null): string {
-  return isrc ? `isrc.eq.${isrc},track_uri.eq.${trackUri}` : `track_uri.eq.${trackUri}`
-}
+import { filtroDaGravacao, isrcValido, discoverRating } from '../lib/gravacao'
 
 export default async function claimRoutes(app: FastifyInstance) {
   // Reivindicar uma música
@@ -55,8 +34,7 @@ export default async function claimRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Dados da música são obrigatórios' })
     }
 
-    const isrcBruto = String(request.body?.isrc ?? '').trim().toUpperCase()
-    const isrc = ISRC_RE.test(isrcBruto) ? isrcBruto : null
+    const isrc = isrcValido(request.body?.isrc)
     const filtro = filtroDaGravacao(trackUri, isrc)
 
     const userId = request.user.id
@@ -97,7 +75,7 @@ export default async function claimRoutes(app: FastifyInstance) {
 
     const nextPosition = (trackCount ?? 0) + 1
     const safePopularity = Number(popularity) || 0
-    const discoverRating = 100 - safePopularity + 100 / nextPosition
+    const rating = discoverRating(safePopularity, nextPosition)
 
     const insertData: Record<string, unknown> = {
       track_url: spotifyUrl,
@@ -107,7 +85,7 @@ export default async function claimRoutes(app: FastifyInstance) {
       artist_name: artistName,
       album_name: albumName,
       popularity: safePopularity,
-      discover_rating: discoverRating,
+      discover_rating: rating,
       track_thumbnail: trackThumbnail,
       user_id: userId,
       position: nextPosition,
@@ -150,8 +128,7 @@ export default async function claimRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'trackUri é obrigatório' })
     }
 
-    const isrcBruto = String(request.query.isrc ?? '').trim().toUpperCase()
-    const isrc = ISRC_RE.test(isrcBruto) ? isrcBruto : null
+    const isrc = isrcValido(request.query.isrc)
 
     const supabase = supabaseForUser(request.accessToken)
     const { data: claim, error } = await supabase

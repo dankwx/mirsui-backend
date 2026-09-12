@@ -38,6 +38,29 @@ export function supabaseForUser(accessToken: string) {
   })
 }
 
+/**
+ * Troca o host interno de uma URL pública do Storage pelo host que o
+ * navegador alcança.
+ *
+ * `getPublicUrl()` monta a URL a partir de `SUPABASE_URL`, que na VPS é
+ * `http://127.0.0.1:54321` — loopback, de propósito, para o backend não passar
+ * pelo nginx (docs/migracao-para-vps.md §7). Gravada assim em
+ * `profiles.avatar_url`, a URL morre no navegador de qualquer pessoa. Os
+ * avatares que existiam antes da migração foram reescritos por SQL para
+ * `https://db.mirsui.com`; os novos precisam nascer certos. Sem
+ * `SUPABASE_PUBLIC_URL` no ambiente (o `next dev` contra a nuvem, por
+ * exemplo) a URL passa intacta.
+ */
+const supabasePublicUrl = (process.env.SUPABASE_PUBLIC_URL || '').replace(/\/+$/, '')
+const supabaseUrlSemBarra = supabaseUrl.replace(/\/+$/, '')
+
+export function urlPublicaDoStorage(url: string): string {
+  if (!supabasePublicUrl || supabasePublicUrl === supabaseUrlSemBarra) return url
+  return url.startsWith(supabaseUrlSemBarra)
+    ? `${supabasePublicUrl}${url.slice(supabaseUrlSemBarra.length)}`
+    : url
+}
+
 export interface Profile {
   id: string
   email: string | null
