@@ -138,6 +138,70 @@ async function throttled<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * O que o Deezer respondeu desde o último `zerarContadoresDeezer()`.
+ *
+ * Existe porque `dz()` devolve `null` para TRÊS coisas diferentes — HTTP fora
+ * de 2xx, quota (erro 4) que sobreviveu às retentativas, e rede — e quem chama
+ * só vê "falhou, tenta amanhã". Entre 27/08 e 11/09/2026 isso escondeu que o
+ * Deezer parava de responder no meio da rodada: a etapa 3 chamava as faixas
+ * não medidas de `adiadas` sob o rótulo "orçamento esgotado" (com 40.000 de
+ * orçamento e 13.000 na fila), e a descoberta, que vem por último, terminava
+ * com `falhasApi` ≈ 1.044 — a rodada inteira — sem uma linha dizendo o que o
+ * Deezer tinha devolvido. Sete noites de descoberta a zero, ~7.000 faixas que
+ * não entraram, e nenhum log explicava.
+ *
+ * `amostra` guarda as primeiras falhas com hora e caminho: é o que diz SE foi
+ * um 403 seco às 05:19 (bloqueio de IP) ou erro 4 espalhado (cota).
+ */
+export interface ContadoresDeezer {
+  ok: number
+  /** Status HTTP fora de 2xx, por código ("403", "429", "503"…). */
+  http: Record<string, number>
+  /** Erro 4 (quota) que continuou depois das retentativas. */
+  quotaEsgotada: number
+  /** fetch lançou: DNS, conexão recusada, reset, timeout. */
+  rede: number
+  /** Erro 4 que a retentativa resolveu — mostra o quão perto da cota a fila anda. */
+  quotaRecuperada: number
+  primeiraFalhaEm: string | null
+  ultimaFalhaEm: string | null
+  amostra: string[]
+}
+
+const AMOSTRA_MAX = 8
+
+const novosContadores = (): ContadoresDeezer => ({
+  ok: 0,
+  http: {},
+  quotaEsgotada: 0,
+  rede: 0,
+  quotaRecuperada: 0,
+  primeiraFalhaEm: null,
+  ultimaFalhaEm: null,
+  amostra: [],
+})
+
+let contadores = novosContadores()
+
+/** Cópia dos contadores. Não zera: quem quer uma janela chama `zerar` antes. */
+export function contadoresDeezer(): ContadoresDeezer {
+  return { ...contadores, http: { ...contadores.http }, amostra: [...contadores.amostra] }
+}
+
+export function zerarContadoresDeezer(): void {
+  contadores = novosContadores()
+}
+
+function registrarFalha(descricao: string, path: string): void {
+  const agora = new Date().toISOString()
+  contadores.primeiraFalhaEm ??= agora
+  contadores.ultimaFalhaEm = agora
+  if (contadores.amostra.length < AMOSTRA_MAX) {
+    contadores.amostra.push(`${agora} ${descricao} ${path}`)
+  }
+}
+
 async function dz<T>(path: string): Promise<T | null> {
   return throttled(async () => {
     for (let tentativa = 0; tentativa <= RETENTATIVAS_QUOTA; tentativa++) {
@@ -146,16 +210,31 @@ async function dz<T>(path: string): Promise<T | null> {
       if (tentativa > 0) await aguardarLargada()
       try {
         const r = await fetch(BASE + path)
-        if (!r.ok) return null
+        if (!r.ok) {
+          const status = String(r.status)
+          contadores.http[status] = (contadores.http[status] ?? 0) + 1
+          registrarFalha(`HTTP ${status}`, path)
+          return null
+        }
         const json = (await r.json()) as T & { error?: DeezerErro }
         // code 4 = quota estourada. Vale esperar e tentar de novo; qualquer
         // outro erro é da própria faixa e quem chamou decide o que fazer.
-        if (json?.error?.code === 4 && tentativa < RETENTATIVAS_QUOTA) {
-          frearFila(ESPERA_QUOTA_MS)
-          continue
+        if (json?.error?.code === 4) {
+          if (tentativa < RETENTATIVAS_QUOTA) {
+            frearFila(ESPERA_QUOTA_MS)
+            continue
+          }
+          contadores.quotaEsgotada++
+          registrarFalha(`quota (erro 4) após ${RETENTATIVAS_QUOTA} retentativas`, path)
+          return null
         }
+        if (tentativa > 0) contadores.quotaRecuperada++
+        contadores.ok++
         return json
-      } catch {
+      } catch (err) {
+        contadores.rede++
+        const causa = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+        registrarFalha(`rede (${causa})`, path)
         return null
       }
     }

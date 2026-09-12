@@ -86,6 +86,29 @@ busca — enriquecimento, não requisito. Ver
   abre a página de uma faixa resolve aquela faixa, uma vez, para sempre.
 - **09:00 — Stakes:** mede os stakes ativos e credita a evolução diária.
 
+#### Onde está o log da rodada
+
+`pm2 logs mirsui-backend` — e o processo tem que estar em **fork mode**, não
+cluster. Em cluster o pm2 captura log interceptando `process.stdout.write` do
+worker; o worker é o `npm`, e o `tsx` é um neto que escreve direto no fd 1, que
+herdou do daemon. Resultado, medido em 12/09/2026: `mirsui-backend-out-0.log`
+com 27 linhas de `> tsx src/server.ts` e nada mais, e três meses de log do
+Observatório enterrados em `~/.pm2/pm2.log`. Se `pm2 describe mirsui-backend`
+disser `cluster_mode`, recrie: `pm2 delete mirsui-backend && pm2 start npm
+--name mirsui-backend -- start && pm2 save`.
+
+O que ler numa rodada, do fim para o começo:
+
+- `Observatório: rodada concluída` — o objeto inteiro, com `deezer: {ok, http,
+  quotaEsgotada, rede, amostra}`. **`descobertaFalhasApi ≈ 1.000 com
+  descobertaNovas: 0` é o Deezer, não o código** — foi assim em 7 das 16 noites
+  entre 27/08 e 11/09, e `deezer.amostra` diz o que ele devolveu e a que hora.
+- `Observatório: Deezer não respondeu parte da fila de medição` (warn) — a
+  etapa 3 teve `naoRespondidas > 0`. Subir `OBS_ORCAMENTO_MEDICAO` não resolve
+  isso; só `foraDoOrcamento > 0` pede orçamento.
+- `Observatório: o Deezer falhou em requisições desta rodada` (warn) — o mesmo
+  resumo, no nível certo para um `grep '"level":40'`.
+
 A descoberta é idempotente por semente, não marca falhas transitórias como
 concluídas e grava faixa, histórico e linhagem na mesma transação. A decisão,
 os motivos e o procedimento de desligamento estão em

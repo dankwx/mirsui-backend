@@ -64,6 +64,8 @@ import {
   buscarPorIsrc,
   buscarPorTexto,
   faixasDoAlbum,
+  contadoresDeezer,
+  zerarContadoresDeezer,
   type FaixaObservada,
 } from '../lib/deezerCatalog'
 
@@ -195,6 +197,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     return vazio
   }
   const db = supabaseAdmin
+
+  // A janela dos contadores do Deezer é a rodada. Eles vão no log da etapa 3 e
+  // no da rodada concluída — é o que distingue "fila maior que o orçamento" de
+  // "o Deezer parou de responder às 05:19", que até 12/09/2026 saíam iguais.
+  zerarContadoresDeezer()
 
   const maxGeneros = num('OBS_MAX_GENEROS', Infinity)
   // Este é o único teto real que sobra, e não é nosso: 300 é o máximo que
@@ -681,20 +688,33 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     // Depois da medição, e contra o que foi medido. Ver o comentário do campo.
     resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.medidasIndividuais)
 
-    log.info(
-      {
-        orcamento: resultado.orcamentoMedicao,
-        filaVencida: resultado.filaVencida,
-        filaLida: resultado.filaLida,
-        medidas: resultado.medidasIndividuais,
-        filaPorBanda,
-        adiadas: resultado.adiadas,
-        desativadas: resultado.desativadas,
-      },
-      resultado.adiadas > 0
-        ? 'Observatório: orçamento esgotado, fila sobrou para amanhã'
-        : 'Observatório: medições individuais concluídas'
-    )
+    // `adiadas` soma duas coisas que pedem reações opostas: o que o orçamento
+    // não alcançou (subir OBS_ORCAMENTO_MEDICAO) e o que o Deezer não
+    // respondeu (não adianta subir nada). Até 12/09/2026 as duas saíam com o
+    // mesmo rótulo, "orçamento esgotado" — com 40.000 de orçamento, 13.000 de
+    // fila e 8.000 adiadas, o rótulo mentia todas as noites.
+    const foraDoOrcamento = Math.max(0, resultado.filaVencida - resultado.filaLida)
+    const naoRespondidas = Math.max(0, resultado.adiadas - foraDoOrcamento)
+    const deezer = contadoresDeezer()
+    const campos = {
+      orcamento: resultado.orcamentoMedicao,
+      filaVencida: resultado.filaVencida,
+      filaLida: resultado.filaLida,
+      medidas: resultado.medidasIndividuais,
+      filaPorBanda,
+      adiadas: resultado.adiadas,
+      foraDoOrcamento,
+      naoRespondidas,
+      desativadas: resultado.desativadas,
+      deezer,
+    }
+    if (naoRespondidas > 0) {
+      ;(log.warn ?? log.info)(campos, 'Observatório: Deezer não respondeu parte da fila de medição')
+    } else if (foraDoOrcamento > 0) {
+      log.info(campos, 'Observatório: orçamento esgotado, fila sobrou para amanhã')
+    } else {
+      log.info(campos, 'Observatório: medições individuais concluídas')
+    }
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: medições individuais falharam')
@@ -879,9 +899,20 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     log.error({ err }, 'Observatório: descoberta de faixas falhou')
   }
 
+  const deezer = contadoresDeezer()
+  const falhasDeezer =
+    deezer.quotaEsgotada + deezer.rede + Object.values(deezer.http).reduce((a, b) => a + b, 0)
   log.info(
-    { ...resultado, segundos: Math.round((Date.now() - inicio) / 1000) },
+    { ...resultado, deezer, segundos: Math.round((Date.now() - inicio) / 1000) },
     'Observatório: rodada concluída'
   )
+  if (falhasDeezer > 0) {
+    // Repetido de propósito, no nível certo: um grep por level 40 tem que
+    // achar a noite em que o Deezer falhou sem ler o objeto da rodada inteira.
+    ;(log.warn ?? log.info)(
+      { falhas: falhasDeezer, ...deezer },
+      'Observatório: o Deezer falhou em requisições desta rodada'
+    )
+  }
   return resultado
 }
