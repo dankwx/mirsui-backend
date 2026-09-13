@@ -3,13 +3,14 @@ import test, { afterEach } from 'node:test'
 import { faixasDoAlbum } from './deezerCatalog'
 
 const originalFetch = globalThis.fetch
+process.env.DEEZER_GATEWAY_TOKEN = 'test-token-not-a-real-credential'
 afterEach(() => { globalThis.fetch = originalFetch })
 const mock = (respostas: unknown[]) => {
   const paths: string[] = []
-  globalThis.fetch = (async (url: unknown) => {
-    paths.push(String(url))
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    paths.push(JSON.parse(String(init.body)).path)
     assert.ok(respostas.length, 'consulta inesperada')
-    return new Response(JSON.stringify(respostas.shift()), { status: 200 })
+    return new Response(JSON.stringify({ ok: true, data: respostas.shift(), fetchedAt: Date.now(), cached: false }), { status: 200 })
   }) as typeof fetch
   return paths
 }

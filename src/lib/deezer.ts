@@ -9,9 +9,11 @@
 // busca também nasce daqui, então esse casamento deixou de existir na maior
 // parte dos casos — a faixa já vem com id do Deezer e ISRC em mãos.
 //
-// Este arquivo NÃO passa pela fila de src/lib/deezerCatalog.ts, de propósito:
-// aqui as chamadas nascem de ação do usuário (buscar, salvar, abrir uma
-// página) e não podem esperar atrás de um job noturno.
+// Frontend, jobs e ações do usuário passam pelo mesmo gateway local, que
+// prioriza chamadas interativas sem ultrapassar o limite global da VPS.
+
+import { deezerRequest } from './deezerTransport'
+import type { DeezerPriority } from './deezerGateway'
 
 interface DeezerJson {
   id?: number
@@ -35,14 +37,9 @@ interface DeezerJson {
   data?: DeezerJson[]
 }
 
-async function dz(path: string): Promise<DeezerJson | null> {
-  try {
-    const r = await fetch('https://api.deezer.com' + path)
-    if (!r.ok) return null
-    return (await r.json()) as DeezerJson
-  } catch {
-    return null
-  }
+async function dz(path: string, priority: DeezerPriority = 'interactive', fresh = false): Promise<DeezerJson | null> {
+  const r = await deezerRequest(path, priority, fresh ? 0 : undefined)
+  return r.ok ? r.data as DeezerJson : null
 }
 
 export interface DeezerResolved {
@@ -64,13 +61,13 @@ export async function resolveTrack(opts: {
   let track: DeezerJson | null = null
 
   if (opts.isrc) {
-    const t = await dz('/track/isrc:' + encodeURIComponent(opts.isrc))
+    const t = await dz('/track/isrc:' + encodeURIComponent(opts.isrc), 'interactive', true)
     if (t && t.id && !t.error) track = t
   }
 
   if (!track) {
     const q = encodeURIComponent(`${opts.artist} ${opts.title}`.trim())
-    const s = await dz('/search?limit=1&q=' + q)
+    const s = await dz('/search?limit=1&q=' + q, 'interactive', true)
     track = s?.data?.[0] ?? null
   }
 
@@ -79,7 +76,7 @@ export async function resolveTrack(opts: {
   const artistId = track.artist?.id
   let nbFan = 0
   if (artistId) {
-    const a = await dz('/artist/' + artistId)
+    const a = await dz('/artist/' + artistId, 'interactive', true)
     if (a && !a.error) nbFan = Number(a.nb_fan) || 0
   }
 
@@ -232,9 +229,10 @@ export async function getAlbumGenres(deezerAlbumId: string): Promise<string[] | 
  * `notFound` = faixa saiu do Deezer (code 800). Outras falhas são transitórias.
  */
 export async function getTrackRank(
-  deezerTrackId: string
+  deezerTrackId: string,
+  priority: DeezerPriority = 'stakes'
 ): Promise<{ rank: number | null; notFound: boolean }> {
-  const t = await dz('/track/' + deezerTrackId)
+  const t = await dz('/track/' + deezerTrackId, priority)
   if (!t) return { rank: null, notFound: false } // rede/transitório
   if (t.error) {
     return { rank: null, notFound: t.error.code === 800 }

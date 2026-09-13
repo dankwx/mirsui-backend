@@ -19,10 +19,13 @@ import {
 // testes existem para essa distinção não se perder numa refatoração.
 
 const fetchOriginal = globalThis.fetch
+process.env.DEEZER_GATEWAY_TOKEN = 'test-token-not-a-real-credential'
 
 const responderCom = (corpo: unknown, ok = true) => {
   globalThis.fetch = (async () =>
-    new Response(JSON.stringify(corpo), {
+    new Response(JSON.stringify((corpo as { error?: { code?: number } })?.error?.code === 4
+      ? { ok: false, status: 429, reason: 'upstream', retryAfterMs: 0 }
+      : { ok: true, data: corpo, fetchedAt: Date.now(), cached: false }), {
       status: ok ? 200 : 500,
       headers: { 'content-type': 'application/json' },
     })) as typeof globalThis.fetch

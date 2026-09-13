@@ -6,6 +6,7 @@
 import { supabaseAdmin } from '../lib/supabase'
 import { getTrackRank } from '../lib/deezer'
 import { computePointsGain, popScore } from '../lib/stakePoints'
+import { sharedStakeRank } from './sharedStakeRank'
 
 interface StakeRow {
   id: string
@@ -63,6 +64,9 @@ export async function runStakeSnapshot(logger?: {
   let skipped = 0
 
   const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+  // Todos os stakes da mesma faixa usam a mesma observação desta execução.
+  // Não reaproveita rank antigo do catálogo: preserva a apuração das 09:00.
+  const rankForTrack = sharedStakeRank(getTrackRank)
 
   for (const stake of stakes) {
     // Idempotência: se já houve snapshot hoje, não conta de novo
@@ -83,7 +87,7 @@ export async function runStakeSnapshot(logger?: {
       continue
     }
 
-    const rankRes = await getTrackRank(stake.deezer_track_id)
+    const rankRes = await rankForTrack(stake.deezer_track_id)
 
     // Faixa saiu do Deezer → marca como removida (não vale mais), para de medir
     if (rankRes.notFound) {
@@ -134,6 +138,6 @@ export async function runStakeSnapshot(logger?: {
     processed++
   }
 
-  log.info({ processed, removed, skipped }, 'Snapshot de stakes concluído')
+  log.info({ processed, removed, skipped, ...rankForTrack.stats }, 'Snapshot de stakes concluído')
   return { processed, removed, skipped }
 }
