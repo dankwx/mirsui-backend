@@ -163,6 +163,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     info: (o, m) => console.log(m ?? '', o),
     error: (o, m) => console.error(m ?? '', o),
   }
+  // Sempre por chamada de método, nunca desprendendo warn do objeto: o pino lê
+  // `this` dentro de warn(), e `(log.warn ?? log.info)(...)` derrubou a etapa 3
+  // e o resumo da rodada de 13/09/2026 com "reading 'Symbol(pino.msgPrefix)'".
+  const warn = (o: unknown, m: string) => (log.warn ? log.warn(o, m) : log.info(o, m))
 
   const vazio: ResultadoObservatorio = {
     pontos: 0,
@@ -709,7 +713,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       deezer,
     }
     if (naoRespondidas > 0) {
-      ;(log.warn ?? log.info)(campos, 'Observatório: Deezer não respondeu parte da fila de medição')
+      warn(campos, 'Observatório: Deezer não respondeu parte da fila de medição')
     } else if (foraDoOrcamento > 0) {
       log.info(campos, 'Observatório: orçamento esgotado, fila sobrou para amanhã')
     } else {
@@ -909,7 +913,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   if (falhasDeezer > 0) {
     // Repetido de propósito, no nível certo: um grep por level 40 tem que
     // achar a noite em que o Deezer falhou sem ler o objeto da rodada inteira.
-    ;(log.warn ?? log.info)(
+    warn(
       { falhas: falhasDeezer, ...deezer },
       'Observatório: o Deezer falhou em requisições desta rodada'
     )

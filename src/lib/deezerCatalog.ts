@@ -33,6 +33,28 @@ const EM_VOO_MAX = 6
 const RETENTATIVAS_QUOTA = 2
 const ESPERA_QUOTA_MS = 5_000
 
+// BLOQUEIO DE IP, que não é a cota de 50/5s.
+//
+// Medido na rodada de 13/09/2026: depois de ~5.000 requisições em 10 min a
+// 8 req/s, o Deezer passou a responder HTTP 403 (não erro 4, não 429) por ~10
+// min; depois liberou ~2.300 chamadas e bloqueou 5 min; depois ~1.400 e
+// bloqueou de novo. Parece um balde que enche a ~4 req/s, não os 10 que a
+// documentação promete — e a noite de 12/09 correu limpa a 8 req/s por 38 min,
+// então o tamanho do balde varia (o front bate no Deezer pelo mesmo IP, e os
+// robôs na página de artista contam). Até aqui um 403 virava `null` na hora e
+// a fila seguia a 8 req/s DENTRO do bloqueio: 9.052 de 19.324 requisições da
+// rodada foram para o lixo, e a descoberta, que vem por último, trouxe zero em
+// 7 de 16 noites.
+//
+// Agora um 403/429 freia a fila INTEIRA e a mesma requisição espera e tenta de
+// novo. A espera dobra a cada onda de bloqueio (30s, 60s, 120s, 240s, 300s…) e
+// volta a zero na primeira resposta boa. Cada requisição tenta até
+// RETENTATIVAS_BLOQUEIO vezes antes de desistir — ~27 min de bloqueio contínuo,
+// mais que o pior visto — e só então vira `null` (contado em `http`).
+const RETENTATIVAS_BLOQUEIO = 8
+const ESPERA_BLOQUEIO_MS = 30_000
+const ESPERA_BLOQUEIO_MAX_MS = 300_000
+
 interface DeezerErro {
   code?: number
   message?: string
@@ -126,6 +148,24 @@ function frearFila(ms: number): void {
   proximaLargada = Math.max(proximaLargada, Date.now() + ms)
 }
 
+/**
+ * Quantas ondas de bloqueio seguidas sem uma resposta boa no meio. Decide o
+ * tamanho do freio. É UMA por onda, não uma por requisição: quando o Deezer
+ * fecha, as ~6 em voo levam 403 quase juntas, e se cada uma dobrasse a espera
+ * a primeira onda já pularia para minutos.
+ */
+let ondasDeBloqueio = 0
+
+function registrarBloqueio(): void {
+  // Já freada por esta onda: não escala, só herda a espera.
+  if (Date.now() < proximaLargada) return
+  const espera = Math.min(ESPERA_BLOQUEIO_MAX_MS, ESPERA_BLOQUEIO_MS * 2 ** ondasDeBloqueio)
+  ondasDeBloqueio++
+  contadores.bloqueios++
+  contadores.esperaBloqueioMs += espera
+  frearFila(espera)
+}
+
 async function throttled<T>(fn: () => Promise<T>): Promise<T> {
   // A vaga vem antes do horário: reservar largada enquanto se está bloqueado
   // deixaria horários vencidos acumulados, e eles sairiam todos de uma vez.
@@ -164,6 +204,12 @@ export interface ContadoresDeezer {
   rede: number
   /** Erro 4 que a retentativa resolveu — mostra o quão perto da cota a fila anda. */
   quotaRecuperada: number
+  /** Ondas de 403/429 que frearam a fila (uma por onda, não por requisição). */
+  bloqueios: number
+  /** Requisições que levaram 403/429 e passaram depois de esperar. */
+  bloqueioRecuperado: number
+  /** Milissegundos que a fila passou parada esperando bloqueio passar. */
+  esperaBloqueioMs: number
   primeiraFalhaEm: string | null
   ultimaFalhaEm: string | null
   amostra: string[]
@@ -177,6 +223,9 @@ const novosContadores = (): ContadoresDeezer => ({
   quotaEsgotada: 0,
   rede: 0,
   quotaRecuperada: 0,
+  bloqueios: 0,
+  bloqueioRecuperado: 0,
+  esperaBloqueioMs: 0,
   primeiraFalhaEm: null,
   ultimaFalhaEm: null,
   amostra: [],
@@ -191,6 +240,7 @@ export function contadoresDeezer(): ContadoresDeezer {
 
 export function zerarContadoresDeezer(): void {
   contadores = novosContadores()
+  ondasDeBloqueio = 0
 }
 
 function registrarFalha(descricao: string, path: string): void {
@@ -202,9 +252,13 @@ function registrarFalha(descricao: string, path: string): void {
   }
 }
 
+const BLOQUEIO = new Set([403, 429])
+
 async function dz<T>(path: string): Promise<T | null> {
   return throttled(async () => {
-    for (let tentativa = 0; tentativa <= RETENTATIVAS_QUOTA; tentativa++) {
+    let quotas = 0
+    let bloqueios = 0
+    for (let tentativa = 0; ; tentativa++) {
       // A primeira largada é a que throttled() já esperou; as retentativas
       // pegam um horário novo, que o freio abaixo empurrou para a frente.
       if (tentativa > 0) await aguardarLargada()
@@ -212,15 +266,24 @@ async function dz<T>(path: string): Promise<T | null> {
         const r = await fetch(BASE + path)
         if (!r.ok) {
           const status = String(r.status)
+          if (BLOQUEIO.has(r.status) && bloqueios < RETENTATIVAS_BLOQUEIO) {
+            bloqueios++
+            registrarBloqueio()
+            continue
+          }
           contadores.http[status] = (contadores.http[status] ?? 0) + 1
-          registrarFalha(`HTTP ${status}`, path)
+          registrarFalha(
+            bloqueios > 0 ? `HTTP ${status} após ${bloqueios} esperas` : `HTTP ${status}`,
+            path
+          )
           return null
         }
         const json = (await r.json()) as T & { error?: DeezerErro }
         // code 4 = quota estourada. Vale esperar e tentar de novo; qualquer
         // outro erro é da própria faixa e quem chamou decide o que fazer.
         if (json?.error?.code === 4) {
-          if (tentativa < RETENTATIVAS_QUOTA) {
+          if (quotas < RETENTATIVAS_QUOTA) {
+            quotas++
             frearFila(ESPERA_QUOTA_MS)
             continue
           }
@@ -228,7 +291,10 @@ async function dz<T>(path: string): Promise<T | null> {
           registrarFalha(`quota (erro 4) após ${RETENTATIVAS_QUOTA} retentativas`, path)
           return null
         }
-        if (tentativa > 0) contadores.quotaRecuperada++
+        // Resposta boa: o bloqueio, se havia, passou.
+        ondasDeBloqueio = 0
+        if (quotas > 0) contadores.quotaRecuperada++
+        if (bloqueios > 0) contadores.bloqueioRecuperado++
         contadores.ok++
         return json
       } catch (err) {
@@ -238,7 +304,6 @@ async function dz<T>(path: string): Promise<T | null> {
         return null
       }
     }
-    return null
   })
 }
 

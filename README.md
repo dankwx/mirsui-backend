@@ -106,6 +106,13 @@ O que ler numa rodada, do fim para o começo:
 - `Observatório: Deezer não respondeu parte da fila de medição` (warn) — a
   etapa 3 teve `naoRespondidas > 0`. Subir `OBS_ORCAMENTO_MEDICAO` não resolve
   isso; só `foraDoOrcamento > 0` pede orçamento.
+- `deezer.bloqueios` / `esperaBloqueioMs` — quantas ondas de **HTTP 403** o
+  Deezer mandou e quanto tempo a fila ficou parada esperando. Medido em
+  13/09/2026: 403 depois de ~5.000 requisições em 10 min, em ondas de 5–10 min,
+  9.052 requisições perdidas. Desde então o 403 freia a fila e repete (ver
+  `RETENTATIVAS_BLOQUEIO` em `src/lib/deezerCatalog.ts`); a rodada fica mais
+  longa, não mais curta. `http.403 > 0` ainda assim significa bloqueio de mais
+  de ~27 min contínuos.
 - `Observatório: o Deezer falhou em requisições desta rodada` (warn) — o mesmo
   resumo, no nível certo para um `grep '"level":40'`.
 
