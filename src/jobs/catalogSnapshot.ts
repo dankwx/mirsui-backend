@@ -12,8 +12,8 @@
 //   2. Traz para o Observatório as faixas que os usuários salvaram e que ainda
 //      não estavam sendo medidas. É a ponta obscura do catálogo — o chart sozinho
 //      enviesa tudo para o que já estourou, e "antes de estourar" é a tese.
-//   3. Mede individualmente quem VENCEU a própria cadência. É o passo que faz o
-//      Observatório continuar seguindo uma faixa depois que ela sai do chart —
+//   3. Mede por álbum, com fallback individual, quem VENCEU a própria cadência.
+//      Mantém o Observatório seguindo a faixa depois que ela sai do chart —
 //      inclusive na descida. Desde a migration 025 esta fila não é mais "todo
 //      mundo que não medi hoje": cada faixa tem uma banda (quente/morna/fria) e
 //      a rodada para quando o ORÇAMENTO acaba, não quando o catálogo acaba.
@@ -41,7 +41,7 @@
 //   morna   teve movimento nos últimos 30 dias                     7 dias
 //   fria    nada disso                                            14 dias
 //
-// — e a etapa 3 gasta um ORÇAMENTO FIXO de requisições por noite, na ordem de
+// — e a etapa 3 admite um ORÇAMENTO FIXO de faixas por noite, na ordem de
 // prioridade. O catálogo cresce, a rodada não.
 //
 // IMPORTANTE PARA LER O LOG: enquanto o catálogo inteiro for mais novo que
@@ -57,6 +57,7 @@
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
 import { runCatalogDiscovery } from './catalogDiscovery'
+import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
 import {
   listarGeneros,
   chartDoGenero,
@@ -86,14 +87,19 @@ export interface ResultadoObservatorio {
   pontos: number
   doChart: number
   doAcervo: number
+  /** Total da etapa 3; nome legado preservado para os consumidores do resumo. */
   medidasIndividuais: number
+  medidasPorAlbum: number
+  medidasPorFaixa: number
+  /** Álbuns consultados na etapa 3, não chamadas HTTP (podem ter páginas/retries). */
+  medicaoAlbunsConsultados: number
   /** faixas cujo source_list virou 'acervo' porque alguém as salvou */
   promovidasAoAcervo: number
   /** faixas que trocaram de banda de cadência nesta rodada */
   reclassificadas: number
   /** distribuição das bandas depois do recálculo: {quente, morna, fria} */
   bandas: Record<string, number>
-  /** teto de requisições da etapa 3 nesta noite */
+  /** teto de faixas admitidas na etapa 3 nesta noite */
   orcamentoMedicao: number
   /** quantas faixas estavam vencidas — se passar do orçamento, sobra fila */
   filaVencida: number
@@ -173,6 +179,9 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     doChart: 0,
     doAcervo: 0,
     medidasIndividuais: 0,
+    medidasPorAlbum: 0,
+    medidasPorFaixa: 0,
+    medicaoAlbunsConsultados: 0,
     promovidasAoAcervo: 0,
     reclassificadas: 0,
     bandas: {},
@@ -519,14 +528,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // critérios das etapas 3 e 4 ao mesmo tempo.
   const consultadasNestaRodada = new Set<string>()
 
-  interface LinhaObservada {
-    deezer_track_id: string
-    deezer_artist_id: string | null
-    deezer_album_id: string | null
-    title: string
-    artist_name: string
-    source_list: string | null
-  }
+  type LinhaObservada = LinhaParaMedir
 
   /**
    * Consulta /track/{id} de cada linha e monta as medições prontas para gravar.
@@ -683,11 +685,21 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       filaPorBanda[banda] = (filaPorBanda[banda] ?? 0) + 1
     }
 
-    await processarEmBlocos(candidatas, async ({ medidas, sumiram }) => {
-      resultado.medidasIndividuais += medidas.length
-      resultado.pontos += await gravar(medidas, 'individual')
-      await desativar(sumiram)
-    })
+    for await (const lote of medirPorAlbum(candidatas)) {
+      resultado.medicaoAlbunsConsultados += lote.albunsConsultados
+      resultado.medidasPorAlbum += lote.medidas.length
+      resultado.medidasIndividuais += lote.medidas.length
+      // Só as faixas com rank válido foram medidas; falhas e ausentes ainda
+      // precisam passar por consultarLote, inclusive para confirmar remoção.
+      for (const f of lote.medidas) consultadasNestaRodada.add(f.deezer_track_id)
+      resultado.pontos += await gravar(lote.medidas, 'medicao-album')
+      await processarEmBlocos(lote.individuais, async ({ medidas, sumiram }) => {
+        resultado.medidasPorFaixa += medidas.length
+        resultado.medidasIndividuais += medidas.length
+        resultado.pontos += await gravar(medidas, 'individual')
+        await desativar(sumiram)
+      })
+    }
 
     // Depois da medição, e contra o que foi medido. Ver o comentário do campo.
     resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.medidasIndividuais)
@@ -705,6 +717,9 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       filaVencida: resultado.filaVencida,
       filaLida: resultado.filaLida,
       medidas: resultado.medidasIndividuais,
+      medidasPorAlbum: resultado.medidasPorAlbum,
+      medidasPorFaixa: resultado.medidasPorFaixa,
+      albunsConsultados: resultado.medicaoAlbunsConsultados,
       filaPorBanda,
       adiadas: resultado.adiadas,
       foraDoOrcamento,
@@ -717,11 +732,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     } else if (foraDoOrcamento > 0) {
       log.info(campos, 'Observatório: orçamento esgotado, fila sobrou para amanhã')
     } else {
-      log.info(campos, 'Observatório: medições individuais concluídas')
+      log.info(campos, 'Observatório: medição por álbum e fallback concluída')
     }
   } catch (err) {
     resultado.falhas++
-    log.error({ err }, 'Observatório: medições individuais falharam')
+    log.error({ err }, 'Observatório: medição por álbum e fallback falhou')
   }
 
   // -------------------------------------------------------------------------

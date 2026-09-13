@@ -96,6 +96,7 @@ interface DeezerFaixa {
 interface DeezerLista<T> {
   data?: T[]
   total?: number
+  next?: string
   error?: DeezerErro
 }
 
@@ -504,15 +505,42 @@ export interface FaixaDoAlbum {
 export async function faixasDoAlbum(
   deezerAlbumId: string
 ): Promise<{ faixas: FaixaDoAlbum[]; falhou: boolean }> {
-  const res = await dz<DeezerLista<DeezerFaixa>>(
-    `/album/${encodeURIComponent(deezerAlbumId)}/tracks?limit=300`
-  )
-
-  if (!res || res.error || !Array.isArray(res.data)) {
-    return { faixas: [], falhou: true }
+  const path = `/album/${encodeURIComponent(deezerAlbumId)}/tracks`
+  const todas: DeezerFaixa[] = []
+  let index = 0
+  for (;;) {
+    const res = await dz<DeezerLista<DeezerFaixa>>(
+      `${path}?limit=300&index=${index}`
+    )
+    if (!res || res.error || !Array.isArray(res.data)) {
+      return { faixas: [], falhou: true }
+    }
+    todas.push(...res.data)
+    if (!res.next) {
+      // Uma lista declaradamente incompleta não confirma ausência de faixa.
+      if (typeof res.total === 'number' && res.total > todas.length) {
+        return { faixas: [], falhou: true }
+      }
+      break
+    }
+    // Não seguimos URLs arbitrárias. Extraímos somente o índice crescente do
+    // mesmo recurso e reconstruímos a chamada no host fixo da API.
+    try {
+      const next = new URL(res.next, BASE)
+      const rawIndex = next.searchParams.get('index')
+      const nextIndex = Number(rawIndex)
+      if (next.hostname !== 'api.deezer.com' || next.pathname !== path ||
+          !rawIndex || !Number.isSafeInteger(nextIndex) || nextIndex <= index ||
+          res.data.length === 0) {
+        return { faixas: [], falhou: true }
+      }
+      index = nextIndex
+    } catch {
+      return { faixas: [], falhou: true }
+    }
   }
 
-  const faixas = res.data.flatMap((t) => {
+  const faixas = todas.flatMap((t) => {
     if (t.id == null) return []
     return [
       {
