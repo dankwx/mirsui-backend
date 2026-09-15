@@ -56,18 +56,30 @@ export default async function adminRoutes(app: FastifyInstance) {
   // O trabalho todo está em `admin_overview()` (migrations/019_painel_do_dono.sql):
   // uma função `security definer` que junta auth.users, achados, fichas,
   // Observatório e a linha do tempo num JSON só. Aqui sobra a porta.
+  //
+  // A curva do catálogo (`catalogo`) vem de uma segunda função,
+  // `admin_catalogo_por_dia()` (migration 034), e é colada aqui: reescrever a
+  // 019 inteira para acrescentar um CTE esconderia a mudança no diff. Para o
+  // frontend continua sendo um JSON só.
   app.get('/admin/overview', { preHandler: requireAuth }, async (request, reply) => {
     const admin = porta(app, request, reply)
     if (!admin) return
 
-    const { data, error } = await admin.rpc('admin_overview')
+    const [overview, catalogo] = await Promise.all([
+      admin.rpc('admin_overview'),
+      admin.rpc('admin_catalogo_por_dia')
+    ])
 
-    if (error) {
-      app.log.error({ err: error }, 'Erro ao montar o painel')
+    if (overview.error) {
+      app.log.error({ err: overview.error }, 'Erro ao montar o painel')
+      return reply.code(500).send({ error: 'Erro ao montar o painel' })
+    }
+    if (catalogo.error) {
+      app.log.error({ err: catalogo.error }, 'Erro ao montar a curva do catálogo')
       return reply.code(500).send({ error: 'Erro ao montar o painel' })
     }
 
-    return reply.send(data)
+    return reply.send({ ...overview.data, catalogo: catalogo.data })
   })
 
   // ---- Perfis semeados (docs/plano-semeadura-de-perfis.md, §7) ----
