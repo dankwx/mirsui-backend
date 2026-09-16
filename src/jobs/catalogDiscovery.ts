@@ -607,16 +607,34 @@ export async function runCatalogDiscovery(
 
   resultado.artistasConsultados = porArtista.size
 
-  // Todas podem nascer juntas: deezerCatalog.ts controla a taxa e o número de
-  // requisições em voo. A alocação das candidatas é feita depois, em ordem,
-  // para duas sementes nunca escolherem a mesma faixa.
-  const radios = await Promise.all(
-    [...porArtista.entries()].map(async ([artistId, grupo]) => ({
-      artistId,
-      grupo,
-      radio: await radioDoArtista(artistId, Math.max(15, grupo.length * 2)),
-    }))
-  )
+  // Em blocos, não tudo de uma vez. O gateway aceita 1.000 requisições
+  // pendentes e cada uma espera no máximo 120 s na fila; a 3 req/s a fila
+  // drena 360 nesse tempo. Com 1.500 sementes eram 556 artistas de uma vez e
+  // ~200 estouravam a espera e repetiam — os "bloqueios" da rodada de
+  // 15/09/2026 eram isso, não o Deezer (o gateway registrou zero ondas). Com
+  // 3.000 sementes seriam ~1.100, acima do que o gateway aceita, e o excedente
+  // morreria como falha de API. 250 drenam em ~83 s, dentro da espera.
+  //
+  // A alocação das candidatas é feita depois, em ordem, para duas sementes
+  // nunca escolherem a mesma faixa.
+  const BLOCO_RADIO = 250
+  const artistas = [...porArtista.entries()]
+  const radios: {
+    artistId: string
+    grupo: Semente[]
+    radio: Awaited<ReturnType<typeof radioDoArtista>>
+  }[] = []
+
+  for (let i = 0; i < artistas.length; i += BLOCO_RADIO) {
+    const bloco = await Promise.all(
+      artistas.slice(i, i + BLOCO_RADIO).map(async ([artistId, grupo]) => ({
+        artistId,
+        grupo,
+        radio: await radioDoArtista(artistId, Math.max(15, grupo.length * 2)),
+      }))
+    )
+    radios.push(...bloco)
+  }
 
   const candidatas: Candidata[] = []
   const paisMarcados: string[] = semArtista.map((s) => s.deezer_track_id)
