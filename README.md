@@ -87,6 +87,44 @@ busca — enriquecimento, não requisito. Ver
   abre a página de uma faixa resolve aquela faixa, uma vez, para sempre.
 - **09:00 — Stakes:** mede os stakes ativos e credita a evolução diária.
 
+#### A blacklist de artistas
+
+`public.blocked_artists` é a lista de artistas que a descoberta nunca colhe, e
+`catalogDiscovery.ts` a consulta uma vez por rodada em três pontos: a fronteira
+não aceita bloqueado, a colheita por álbum pula a faixa, e o rádio pula a
+candidata. Ver **migration 036**.
+
+O problema que ela resolve: o único filtro sobre uma candidata é ter título,
+ter artista e ter rank — nada olha o QUE a faixa é. E o dial de obscuridade
+(`OBS_DESCOBERTA_MAX_FAS`, artistas com até 50 mil fãs, do menos popular para
+cima) aponta exatamente para onde mora o conteúdo não-musical: poucos fãs,
+discografia enorme. Karaokê, playback, ruído branco, frequência terapêutica,
+palestra.
+
+Medido em 20/09/2026 sobre o dump de 03/09 (18.164 faixas ativas), com o modelo
+de decisão `jev-1.13` da TypeSafe via OpenRouter — três perguntas por faixa
+(playback, áudio funcional, fala), limiar 0,70:
+
+    503 faixas (2,77%) de conteúdo inequivocamente não-musical
+    430 delas (85%) vindas de SEIS artistas
+    300 de um álbum só: o Alcorão recitado inteiro
+
+Aplicado em produção no mesmo dia: 452 faixas desses seis (eles cresceram desde
+o dump), mais 73 faixas soltas de artistas que têm música real e também
+despejaram playback — nesses o artista fica e só a faixa sai. E 2 dos seis ainda
+estavam na fronteira, prestes a serem recolhidos naquela noite.
+
+**A regra é de graça.** O modelo serviu para descobrir QUEM são, uma vez; o que
+roda toda noite é um `Set` de seis strings lido do banco. Não há chamada de API
+recorrente, e os vereditos ficaram em `~/mirsui-jev/` para re-thresholdar sem
+pagar de novo.
+
+Três categorias ficaram **de fora** de propósito, porque não são lixo: cover
+(pegaria os edits *slowed + reverb* e *sped up*), medley/popurri (formato de
+lançamento legítimo em sertanejo, gospel e cumbia) e interlúdio (faixa de álbum
+de artista real). As probabilidades estão medidas no arquivo, se um dia a
+decisão mudar.
+
 #### Onde está o log da rodada
 
 `pm2 logs mirsui-backend` — e o processo tem que estar em **fork mode**, não
@@ -381,5 +419,6 @@ A API espera as tabelas `profiles`, `tracks`, `track_comments`, `favorites`, al�
 - **RPC `get_track_save_counts(p_track_ids integer[])`** para os contadores do feed e do perfil (ver `migrations/006_salvar_de_verdade.sql`).
 - **RPC `get_trending_tracks(p_limit integer)`** para as faixas em alta da landing.
 - A coluna `profiles.email` preenchida pelo trigger — usada na checagem de email duplicado no signup.
+- **`blocked_artists`** — artistas que a descoberta nunca colhe (migration 036). Lida pelo job com a service role key; RLS ligada e `anon`/`authenticated` sem grant, como em `discovery_artists`.
 
 🔒 = exige header `Authorization: Bearer <access_token>` (access token da sessão Supabase). Sem token: `401 { "error": "Token não fornecido" }` · token inválido: `401 { "error": "Usuário não autenticado" }`.

@@ -288,6 +288,7 @@ async function caminhadaPorAlbum(
   config: ConfigDescoberta,
   alvo: number,
   conhecidas: Set<string>,
+  bloqueados: Set<string>,
   resultado: ResultadoDescoberta
 ): Promise<void> {
   if (alvo <= 0) return
@@ -346,6 +347,7 @@ async function caminhadaPorAlbum(
       // mais. Acima do teto o artista já chega sozinho por chart ou por save.
       const candidatos = artistas
         .filter((a) => a.nb_fan != null && a.nb_fan <= config.maxFas)
+        .filter((a) => !bloqueados.has(a.deezer_artist_id))
         .sort((x, y) => (x.nb_fan ?? 0) - (y.nb_fan ?? 0))
         .slice(0, config.relacionadosPorSemente)
 
@@ -436,6 +438,7 @@ async function caminhadaPorAlbum(
         // O mesmo filtro que record_observations aplica no SQL. Aplicado aqui
         // também para a contagem do log bater com o que o banco gravou.
         if (!f.title || !f.artist_name || f.rank == null) continue
+        if (f.deezer_artist_id && bloqueados.has(f.deezer_artist_id)) continue
         resultado.albumFaixasColhidas++
         if (conhecidas.has(f.deezer_track_id)) continue
         conhecidas.add(f.deezer_track_id)
@@ -515,6 +518,18 @@ async function lerFronteira(db: SupabaseClient, limite: number): Promise<Artista
   }))
 }
 
+/**
+ * Artistas que a descoberta nunca deve colher. A lista nasceu de uma varredura
+ * do catálogo com um modelo de decisão (migration 036) e mora no banco porque
+ * manter a regra não custa chamada nenhuma — o modelo serviu para descobrir
+ * QUEM são, não para decidir a cada noite.
+ */
+async function lerBloqueados(db: SupabaseClient): Promise<Set<string>> {
+  const { data, error } = await db.from('blocked_artists').select('deezer_artist_id')
+  if (error) throw error
+  return new Set((data ?? []).map((l) => String(l.deezer_artist_id)))
+}
+
 export async function runCatalogDiscovery(
   logger: Log,
   config = configDescobertaDoAmbiente()
@@ -553,9 +568,12 @@ export async function runCatalogDiscovery(
 
   const todosIds = await lerTodosIds(db)
   const conhecidas = new Set(todosIds)
+  const bloqueados = await lerBloqueados(db)
 
   try {
-    await caminhadaPorAlbum(db, logger, config, resultado.albumAlvo, conhecidas, resultado)
+    await caminhadaPorAlbum(
+      db, logger, config, resultado.albumAlvo, conhecidas, bloqueados, resultado
+    )
   } catch (err) {
     // Não propaga: o rádio é a outra metade do orçamento e não tem culpa.
     resultado.falhasApi++
@@ -655,6 +673,7 @@ export async function runCatalogDiscovery(
 
       for (const faixa of pool.values()) {
         if (conhecidas.has(faixa.deezer_track_id)) continue
+        if (faixa.deezer_artist_id && bloqueados.has(faixa.deezer_artist_id)) continue
         escolhida = faixa
         break
       }
