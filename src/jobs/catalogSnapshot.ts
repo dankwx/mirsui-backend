@@ -97,6 +97,15 @@ export interface ResultadoObservatorio {
   promovidasAoAcervo: number
   /** faixas que trocaram de banda de cadência nesta rodada */
   reclassificadas: number
+  /**
+   * Quantos lotes a cadência precisou (migration 035) e quantas faixas eles
+   * examinaram. Vale olhar os dois juntos: se `cadenciaExaminadas` ficar muito
+   * abaixo do catálogo ativo, algum lote morreu no meio e metade das faixas
+   * ficou com a banda de ontem — que é exatamente o que ninguém viu acontecer
+   * entre 17 e 20/09/2026.
+   */
+  cadenciaLotes: number
+  cadenciaExaminadas: number
   /** distribuição das bandas depois do recálculo: {quente, morna, fria} */
   bandas: Record<string, number>
   /** teto de faixas admitidas na etapa 3 nesta noite */
@@ -184,6 +193,8 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     medicaoAlbunsConsultados: 0,
     promovidasAoAcervo: 0,
     reclassificadas: 0,
+    cadenciaLotes: 0,
+    cadenciaExaminadas: 0,
     bandas: {},
     orcamentoMedicao: 0,
     filaVencida: 0,
@@ -496,22 +507,62 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     if (errPromo) throw errPromo
     resultado.promovidasAoAcervo = Number(promovidas) || 0
 
-    const { data: cadencia, error: errCadencia } = await db.rpc('refresh_observatory_cadence', {
-      p_cadencia_morna: cadenciaMorna,
-      p_cadencia_fria: cadenciaFria,
-      p_janela_movimento: janelaMovimento,
-      p_janela_novidade: janelaNovidade,
-    })
-    if (errCadencia) throw errCadencia
+    // A cadência vem em lotes desde a migration 035, e o laço é AQUI, fora do
+    // banco — não por estilo. `statement_timeout` é armado para o statement de
+    // cima, a chamada da função; paginar por dentro dela, num laço plpgsql,
+    // não moveria o relógio, porque o relógio é o da chamada inteira. Mesma
+    // lição da 031 com a fila.
+    //
+    // O lote é grande de propósito: o custo por faixa é baixo (uma junção
+    // contra três conjuntos pequenos) e o que precisa caber no relógio é a
+    // ESCRITA. 20.000 dão folga larga sobre os ~10s que derrubavam o passo
+    // quando ele tentava o catálogo inteiro de uma vez.
+    const loteCadencia = num('OBS_LOTE_CADENCIA', 20_000)
+    // 500 lotes de 20.000 são 10 milhões de faixas — 20x o teto do catálogo.
+    // O teto existe para o caso de o cursor deixar de avançar: sem ele, um
+    // contrato quebrado na função viraria laço infinito segurando a rodada.
+    const MAX_LOTES = 500
 
-    const c = (cadencia ?? {}) as { reclassificadas?: number; distribuicao?: Record<string, number> }
-    resultado.reclassificadas = Number(c.reclassificadas) || 0
-    resultado.bandas = c.distribuicao ?? {}
+    let cursor: string | null = null
+    do {
+      const { data: cadencia, error: errCadencia } = await db.rpc('refresh_observatory_cadence', {
+        p_cadencia_morna: cadenciaMorna,
+        p_cadencia_fria: cadenciaFria,
+        p_janela_movimento: janelaMovimento,
+        p_janela_novidade: janelaNovidade,
+        p_lote: loteCadencia,
+        p_depois: cursor,
+      })
+      if (errCadencia) throw errCadencia
+
+      const c = (cadencia ?? {}) as {
+        reclassificadas?: number
+        examinadas?: number
+        proximo?: string | null
+        distribuicao?: Record<string, number>
+      }
+      resultado.reclassificadas += Number(c.reclassificadas) || 0
+      resultado.cadenciaExaminadas += Number(c.examinadas) || 0
+      resultado.cadenciaLotes++
+      // A distribuição só vem no último lote; os intermediários mandam {}.
+      if (c.distribuicao && Object.keys(c.distribuicao).length > 0) {
+        resultado.bandas = c.distribuicao
+      }
+
+      cursor = c.proximo ?? null
+      if (cursor && resultado.cadenciaLotes >= MAX_LOTES) {
+        throw new Error(
+          `Cadência: ${resultado.cadenciaLotes} lotes sem terminar (cursor em ${cursor}) — o cursor não está avançando`
+        )
+      }
+    } while (cursor)
 
     log.info(
       {
         promovidas: resultado.promovidasAoAcervo,
         reclassificadas: resultado.reclassificadas,
+        lotes: resultado.cadenciaLotes,
+        examinadas: resultado.cadenciaExaminadas,
         bandas: resultado.bandas,
         cadencias: { quente: 1, morna: cadenciaMorna, fria: cadenciaFria },
       },
