@@ -58,6 +58,7 @@ import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
 import { runCatalogDiscovery } from './catalogDiscovery'
 import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
+import { preencherFichaDosAlbuns } from './albumDetails'
 import {
   listarGeneros,
   chartDoGenero,
@@ -65,7 +66,6 @@ import {
   buscarPorIsrc,
   buscarPorTexto,
   faixasDoAlbum,
-  fichaDoAlbum,
   contadoresDeezer,
   zerarContadoresDeezer,
   type FaixaObservada,
@@ -978,60 +978,14 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // -------------------------------------------------------------------------
   // 4b. Gênero e data que faltam — a ficha da página de faixa
   // -------------------------------------------------------------------------
-  // Desde a migration 037 a página de faixa sai do banco, sem perguntar ao
-  // Deezer na visita. O gênero mora no álbum, e só o chart o traz de graça: a
-  // faixa que entrou por rádio ou pelo acervo chega sem ele, e a data só vem
-  // de /track/{id}. Uma requisição a /album/{id} resolve as duas coisas para
-  // todas as faixas do álbum de uma vez.
-  //
-  // A fila é "nunca perguntei", como a do ISRC: álbum sem gênero no Deezer é
-  // marcado e sai, em vez de voltar toda noite. Vem antes da descoberta porque
-  // o que ela colhe já nasce com gênero e data.
+  // Ver src/jobs/albumDetails.ts. Vem antes da descoberta porque o que ela
+  // colhe já nasce com gênero e data.
   try {
-    if (limiteFichaAlbum > 0) {
-      const { data: tamanho, error: errTamanho } = await db.rpc('album_details_queue_size')
-      if (errTamanho) throw errTamanho
-      resultado.fichaAlbumFila = Number(tamanho) || 0
-
-      const albuns = await lerFila<{ deezer_album_id: string }>(
-        () => db.rpc('album_details_queue', { p_limite: limiteFichaAlbum }),
-        limiteFichaAlbum
-      )
-
-      const BLOCO_FICHA = 100
-      for (let i = 0; i < albuns.length; i += BLOCO_FICHA) {
-        const bloco = albuns.slice(i, i + BLOCO_FICHA)
-        const respostas = await Promise.all(
-          bloco.map(async ({ deezer_album_id }) => ({
-            deezer_album_id,
-            ...(await fichaDoAlbum(deezer_album_id)),
-          }))
-        )
-        resultado.fichaAlbumConsultados += bloco.length
-        // Falha passageira não marca: o álbum volta amanhã.
-        const linhas = respostas
-          .filter((r) => !r.falhou)
-          .map(({ deezer_album_id, genero, release_date }) => ({ deezer_album_id, genre: genero, release_date }))
-        if (linhas.length === 0) continue
-        const { data, error } = await db.rpc('record_album_details', { p_rows: linhas })
-        if (error) {
-          resultado.falhas++
-          log.error({ err: error, tamanho: linhas.length }, 'Falha ao gravar a ficha dos álbuns')
-          continue
-        }
-        resultado.fichaAlbumFaixas += Number(data) || 0
-      }
-
-      log.info(
-        {
-          fila: resultado.fichaAlbumFila,
-          limite: limiteFichaAlbum,
-          consultados: resultado.fichaAlbumConsultados,
-          faixas: resultado.fichaAlbumFaixas,
-        },
-        'Observatório: gênero e data dos álbuns preenchidos'
-      )
-    }
+    const ficha = await preencherFichaDosAlbuns(db, limiteFichaAlbum, log)
+    resultado.fichaAlbumFila = ficha.fila
+    resultado.fichaAlbumConsultados = ficha.consultados
+    resultado.fichaAlbumFaixas = ficha.faixas
+    resultado.falhas += ficha.falhas
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: etapa da ficha dos álbuns falhou')
