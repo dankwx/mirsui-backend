@@ -21,9 +21,13 @@ interface DeezerAlbum {
   cover?: string
   cover_medium?: string
   md5_image?: string
-  // Só vêm em /artist/{id}/albums, não no álbum embutido na faixa.
+  // Só vêm em /artist/{id}/albums e /album/{id}, não no álbum embutido na faixa.
   record_type?: string
   release_date?: string
+  genre_id?: number
+  /** só em /album/{id} */
+  genres?: { data?: DeezerGenero[] }
+  error?: DeezerErro
 }
 
 interface DeezerArtistaRelacionado {
@@ -38,6 +42,14 @@ interface DeezerFaixa {
   title_short?: string
   rank?: number
   isrc?: string
+  duration?: number
+  explicit_lyrics?: boolean
+  /** URL assinada de 30 s; string vazia quando a gravação não tem prévia */
+  preview?: string
+  /** só em /track/{id} e /track/isrc:X */
+  release_date?: string
+  /** só em /track/{id} e /track/isrc:X: principal + participações, em ordem */
+  contributors?: DeezerArtista[]
   artist?: DeezerArtista
   album?: DeezerAlbum
   error?: DeezerErro
@@ -181,6 +193,60 @@ export interface FaixaObservada {
   genre: string | null
   source_list: string
   rank: number
+  /**
+   * Os campos fixos da gravação (migration 037). Vêm de graça nas respostas
+   * que a rodada já pede e eram descartados; agora ficam, para a página de
+   * faixa não ter que perguntar ao Deezer a cada visita. Opcionais porque cada
+   * endpoint traz uma parte: `/album/{id}/tracks`, chart, busca e rádio trazem
+   * duração, explícito e prévia; data e participações só vêm de `/track`.
+   * Ausente ou null = "esta resposta não disse", e o banco mantém o que tinha.
+   */
+  duration_seconds?: number | null
+  explicit_lyrics?: boolean | null
+  has_preview?: boolean | null
+  release_date?: string | null
+  contributors?: ArtistaCreditado[] | null
+}
+
+export interface ArtistaCreditado {
+  id: string
+  name: string
+}
+
+/**
+ * Data do Deezer só se for uma data de verdade. O Deezer manda `0000-00-00`
+ * para lançamento desconhecido, e um valor inválido derrubaria o lote inteiro
+ * no cast do Postgres.
+ */
+function dataValida(s: string | undefined): string | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null
+  const d = new Date(s + 'T00:00:00Z')
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null
+  return d.getUTCFullYear() >= 1900 ? s : null
+}
+
+type CamposFixos = Pick<
+  FaixaObservada,
+  'duration_seconds' | 'explicit_lyrics' | 'has_preview' | 'release_date' | 'contributors'
+>
+
+/**
+ * O que a resposta traz da gravação além do rank. Campo que o endpoint não
+ * manda vira null, nunca um palpite: `explicit_lyrics` ausente não é "não
+ * explícito", e prévia ausente do objeto não é "sem prévia".
+ */
+function camposFixos(t: DeezerFaixa): CamposFixos {
+  const creditados = (t.contributors ?? []).flatMap((a) =>
+    a.id != null && a.name ? [{ id: String(a.id), name: a.name }] : []
+  )
+  return {
+    duration_seconds:
+      typeof t.duration === 'number' && t.duration > 0 ? Math.round(t.duration) : null,
+    explicit_lyrics: typeof t.explicit_lyrics === 'boolean' ? t.explicit_lyrics : null,
+    has_preview: typeof t.preview === 'string' ? t.preview.length > 0 : null,
+    release_date: dataValida(t.release_date),
+    contributors: creditados.length > 0 ? creditados : null,
+  }
 }
 
 export interface ResultadoRadioArtista {
@@ -257,12 +323,13 @@ export async function chartDoGenero(
         genre: generoId === 0 ? null : generoNome,
         source_list: `chart:${generoId}`,
         rank: t.rank,
+        ...camposFixos(t),
       },
     ]
   })
 }
 
-export interface FaixaDetalhada {
+export interface FaixaDetalhada extends CamposFixos {
   rank: number
   isrc: string | null
   deezer_artist_id: string | null
@@ -301,12 +368,13 @@ export async function buscarFaixa(deezerTrackId: string): Promise<{
       artist_name: t.artist?.name ?? null,
       album_name: t.album?.title ?? null,
       cover_md5: extrairCoverMd5(t.album),
+      ...camposFixos(t),
     },
     notFound: false,
   }
 }
 
-export interface FaixaDoAlbum {
+export interface FaixaDoAlbum extends CamposFixos {
   deezer_track_id: string
   deezer_artist_id: string | null
   isrc: string | null
@@ -379,6 +447,7 @@ export async function faixasDoAlbum(
         title: t.title || t.title_short || null,
         artist_name: t.artist?.name ?? null,
         rank: typeof t.rank === 'number' ? t.rank : null,
+        ...camposFixos(t),
       },
     ]
   })
@@ -444,6 +513,8 @@ export interface AlbumDoArtista {
   /** album | single | ep | compilation */
   record_type: string | null
   release_date: string | null
+  /** id do gênero principal no Deezer; o nome sai de `listarGeneros()` */
+  genre_id: number | null
 }
 
 /**
@@ -488,7 +559,9 @@ export async function albunsDoArtista(
         title: a.title ?? null,
         cover_md5: extrairCoverMd5(a),
         record_type: a.record_type ?? null,
-        release_date: a.release_date ?? null,
+        release_date: dataValida(a.release_date),
+        // -1 e 0 são "sem gênero" no Deezer.
+        genre_id: typeof a.genre_id === 'number' && a.genre_id > 0 ? a.genre_id : null,
       },
     ]
   })
@@ -531,6 +604,7 @@ export async function buscarPorIsrc(isrc: string): Promise<FaixaObservada | null
     genre: null,
     source_list: 'acervo',
     rank: t.rank,
+    ...camposFixos(t),
   }
 }
 
@@ -616,6 +690,7 @@ export async function buscarPorTexto(
     genre: null,
     source_list: 'acervo',
     rank: t.rank,
+    ...camposFixos(t),
   }
 }
 
@@ -665,9 +740,38 @@ export async function radioDoArtista(
         genre: null,
         source_list: `radio:${deezerArtistId}`,
         rank: t.rank,
+        ...camposFixos(t),
       },
     ]
   })
 
   return { faixas, falhou: false }
+}
+
+export interface FichaDoAlbum {
+  /** o primeiro gênero do álbum, no mesmo vocabulário do chart */
+  genero: string | null
+  release_date: string | null
+  /** rede, quota ou resposta ilegível: não marque o álbum, tente amanhã */
+  falhou: boolean
+}
+
+/**
+ * Gênero e data de um álbum, numa requisição.
+ *
+ * Existe para a página de faixa não precisar do Deezer (migration 037). O
+ * gênero mora no álbum, não na faixa, e só o chart o entrega de graça — a
+ * faixa que entrou por descoberta, rádio ou acervo chega sem ele. Medido no
+ * dump de 03/09/2026: 74% das faixas ativas sem gênero. Até aqui a página
+ * pedia `/album/{id}` a cada visita para preencher esse buraco.
+ *
+ * Álbum que o Deezer não tem mais (800) é resposta: volta vazio e sem falha,
+ * para a marca de "já perguntei" tirá-lo da fila.
+ */
+export async function fichaDoAlbum(deezerAlbumId: string): Promise<FichaDoAlbum> {
+  const a = await dz<DeezerAlbum>(`/album/${encodeURIComponent(deezerAlbumId)}`)
+  if (a?.error?.code === SEM_DADOS) return { genero: null, release_date: null, falhou: false }
+  if (!a || a.error || a.id == null) return { genero: null, release_date: null, falhou: true }
+  const genero = a.genres?.data?.find((g) => typeof g.name === 'string' && g.name)?.name ?? null
+  return { genero, release_date: dataValida(a.release_date), falhou: false }
 }

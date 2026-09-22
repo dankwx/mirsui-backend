@@ -81,6 +81,11 @@ export async function* medirPorAlbum(
           genre: null,
           source_list: r.source_list ?? 'chart:0',
           rank: f.rank,
+          // Duração, explícito e prévia vêm na mesma resposta; data e
+          // participações não (só /track traz), e ficam como estão no banco.
+          duration_seconds: f.duration_seconds,
+          explicit_lyrics: f.explicit_lyrics,
+          has_preview: f.has_preview,
         })
       }
     }

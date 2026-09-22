@@ -36,6 +36,7 @@ import {
   relacionadosDoArtista,
   albunsDoArtista,
   faixasDoAlbum,
+  listarGeneros,
   type FaixaObservada,
 } from '../lib/deezerCatalog'
 import { popScore } from '../lib/stakePoints'
@@ -387,6 +388,11 @@ async function caminhadaPorAlbum(
   const maxRequisicoes = alvo
   const fila = await lerFronteira(db, Math.max(1, Math.ceil(alvo / 4)))
 
+  // A discografia traz o `genre_id` de cada álbum; o nome sai daqui, no mesmo
+  // vocabulário do chart. Uma requisição por noite, e é o que dá gênero à
+  // página de faixa de tudo que esta caminhada colhe (migration 037).
+  const nomeDoGenero = new Map((await listarGeneros()).map((g) => [g.id, g.name]))
+
   const colhidas: Candidata[] = []
   const progresso: Record<string, unknown>[] = []
 
@@ -452,9 +458,16 @@ async function caminhadaPorAlbum(
           artist_name: f.artist_name,
           album_name: album.title,
           cover_md5: album.cover_md5,
-          genre: null,
+          genre: (album.genre_id != null && nomeDoGenero.get(album.genre_id)) || null,
           source_list: `album:${album.deezer_album_id}`,
           rank: f.rank,
+          duration_seconds: f.duration_seconds,
+          explicit_lyrics: f.explicit_lyrics,
+          has_preview: f.has_preview,
+          // A faixa de álbum não traz data; o álbum, na discografia, traz. É a
+          // data que a página mostra até uma medição por /track trazer a da
+          // própria faixa, que costuma ser a mesma.
+          release_date: album.release_date,
           // A linhagem aponta para a faixa do catálogo que levou até este
           // artista. `null` quando a faixa colhida É a semente: a constraint
           // observed_tracks_recommendation_not_self proíbe apontar para si.

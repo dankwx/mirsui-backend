@@ -80,3 +80,22 @@ test('agrupa antes dos blocos e deduplica IDs sem exceder as faixas admitidas', 
   assert.equal(r.medidas.length, 2)
   assert.equal(r.individuais.length, 300)
 })
+
+test('a medição por álbum leva duração, explícito e prévia, e não apaga data nem participações', async () => {
+  const r = await coletar([linha('1'), linha('2')], async () => ({
+    falhou: false,
+    faixas: [
+      { ...faixa('1', 10), duration_seconds: 180, explicit_lyrics: true, has_preview: false },
+      { ...faixa('2', 20), duration_seconds: null, explicit_lyrics: null, has_preview: null },
+    ],
+  }))
+  const [um, dois] = r.medidas
+  assert.equal(um.duration_seconds, 180)
+  assert.equal(um.explicit_lyrics, true)
+  assert.equal(um.has_preview, false)
+  // Ausente, e não null: record_observations lê as duas coisas como "não
+  // disse", mas o contrato é que o álbum nem toca nesses campos.
+  assert.equal('release_date' in um, false)
+  assert.equal('contributors' in um, false)
+  assert.equal(dois.has_preview, null)
+})
