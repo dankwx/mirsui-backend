@@ -775,3 +775,160 @@ export async function fichaDoAlbum(deezerAlbumId: string): Promise<FichaDoAlbum>
   const genero = a.genres?.data?.find((g) => typeof g.name === 'string' && g.name)?.name ?? null
   return { genero, release_date: dataValida(a.release_date), falhou: false }
 }
+
+interface DeezerArtistaCompleto {
+  id?: number
+  name?: string
+  picture_small?: string
+  picture_medium?: string
+  picture_big?: string
+  picture_xl?: string
+  nb_album?: number
+  nb_fan?: number
+  error?: DeezerErro
+}
+
+/** Uma das mais ouvidas, na forma que `artist_details.top` guarda (040). */
+export interface FaixaDoTopo {
+  deezer_track_id: string
+  title: string
+  deezer_artist_id: string | null
+  artist_name: string | null
+  deezer_album_id: string | null
+  album_name: string | null
+  cover_md5: string | null
+  duration_seconds: number | null
+  explicit_lyrics: boolean | null
+  rank: number | null
+  contributors: ArtistaCreditado[] | null
+}
+
+/** Um lançamento, na forma que `artist_details.albums` guarda (040). */
+export interface LancamentoDoArtista {
+  deezer_album_id: string
+  album_name: string
+  cover_md5: string | null
+  /** album | single | ep | compile */
+  record_type: string | null
+  release_date: string | null
+  genre_id: number | null
+}
+
+export interface FichaDoArtista {
+  /** rede, quota ou resposta ilegível em qualquer das três: tente amanhã */
+  falhou: boolean
+  /** /artist/{id} respondeu 800: o artista não existe mais no Deezer */
+  inexistente: boolean
+  name: string | null
+  picture_md5: string | null
+  nb_fan: number | null
+  nb_album: number | null
+  top: FaixaDoTopo[]
+  albums: LancamentoDoArtista[]
+  /** quantos lançamentos o Deezer diz ter; `albums` traz até 100 */
+  albums_total: number | null
+}
+
+/**
+ * O md5 da foto está no meio da URL do CDN. Artista sem foto vem com o
+ * segmento vazio (`/images/artist//56x56-…`), e aí não há md5.
+ */
+function extrairFotoMd5(a: DeezerArtistaCompleto): string | null {
+  for (const url of [a.picture_small, a.picture_medium, a.picture_big, a.picture_xl]) {
+    const m = (url ?? '').match(/\/images\/artist\/([0-9a-f]{32})\//i)
+    if (m) return m[1].toLowerCase()
+  }
+  return null
+}
+
+const inteiro = (n: unknown): number | null =>
+  typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : null
+
+function faixaDoTopo(t: DeezerFaixa): FaixaDoTopo | null {
+  const titulo = t.title || t.title_short
+  if (t.id == null || !titulo) return null
+  const fixos = camposFixos(t)
+  return {
+    deezer_track_id: String(t.id),
+    title: titulo,
+    deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+    artist_name: t.artist?.name ?? null,
+    deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
+    album_name: t.album?.title ?? null,
+    cover_md5: extrairCoverMd5(t.album),
+    duration_seconds: fixos.duration_seconds ?? null,
+    explicit_lyrics: fixos.explicit_lyrics ?? null,
+    rank: inteiro(t.rank),
+    contributors: fixos.contributors ?? null,
+  }
+}
+
+const FICHA_VAZIA: Omit<FichaDoArtista, 'falhou' | 'inexistente'> = {
+  name: null,
+  picture_md5: null,
+  nb_fan: null,
+  nb_album: null,
+  top: [],
+  albums: [],
+  albums_total: null,
+}
+
+/**
+ * A ficha da página de artista: as três requisições que a página fazia a cada
+ * visita, feitas uma vez pela rodada (migration 040).
+ *
+ * `/artist/{id}` vai primeiro e sozinho: se o artista não existe mais (800),
+ * as outras duas seriam cota jogada fora. Top e discografia vão juntos. Uma
+ * falha em qualquer das três devolve `falhou`, e nada é gravado: uma ficha
+ * pela metade (foto sem discografia) apagaria a boa que já estava lá.
+ *
+ * `/top` sem dados (800) é artista sem faixa tocada, e `/albums` sem dados é
+ * discografia vazia: são respostas, não falhas.
+ */
+export async function fichaDoArtista(deezerArtistId: string): Promise<FichaDoArtista> {
+  const id = encodeURIComponent(deezerArtistId)
+  const a = await dz<DeezerArtistaCompleto>(`/artist/${id}`)
+  if (a?.error?.code === SEM_DADOS) return { ...FICHA_VAZIA, falhou: false, inexistente: true }
+  if (!a || a.error || a.id == null || !a.name) {
+    return { ...FICHA_VAZIA, falhou: true, inexistente: false }
+  }
+
+  const [top, disco] = await Promise.all([
+    dz<DeezerLista<DeezerFaixa>>(`/artist/${id}/top?limit=99`),
+    albunsDoArtista(deezerArtistId, 0, 100),
+  ])
+  const topSemDados = top?.error?.code === SEM_DADOS
+  if (disco.falhou || (!topSemDados && (!top || top.error || !Array.isArray(top.data)))) {
+    return { ...FICHA_VAZIA, falhou: true, inexistente: false }
+  }
+
+  return {
+    falhou: false,
+    inexistente: false,
+    name: a.name,
+    picture_md5: extrairFotoMd5(a),
+    nb_fan: inteiro(a.nb_fan),
+    nb_album: inteiro(a.nb_album),
+    top: topSemDados
+      ? []
+      : (top?.data ?? []).flatMap((t) => {
+          const f = faixaDoTopo(t)
+          return f ? [f] : []
+        }),
+    albums: disco.albuns.flatMap((l) =>
+      l.title
+        ? [
+            {
+              deezer_album_id: l.deezer_album_id,
+              album_name: l.title,
+              cover_md5: l.cover_md5,
+              record_type: l.record_type,
+              release_date: l.release_date,
+              genre_id: l.genre_id,
+            },
+          ]
+        : []
+    ),
+    albums_total: disco.total,
+  }
+}

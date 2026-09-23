@@ -7,6 +7,7 @@ import {
   buscarFaixa,
   faixasDoAlbum,
   fichaDoAlbum,
+  fichaDoArtista,
 } from './deezerCatalog'
 
 // "não tem" contra "não consegui perguntar"
@@ -165,4 +166,124 @@ test('a discografia traz o id do gênero; -1 e 0 são "sem gênero"', async () =
   ], total: 3 })
   const r = await albunsDoArtista('27')
   assert.deepEqual(r.albuns.map((a) => a.genre_id), [106, null, null])
+})
+
+// A ficha do artista (migration 040) faz três chamadas. O gateway recebe o
+// path no corpo, então a resposta falsa escolhe pelo path.
+const responderPorPath = (rotas: Record<string, unknown>) => {
+  const pedidos: string[] = []
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    const { path } = JSON.parse(String(init?.body)) as { path: string }
+    pedidos.push(path)
+    const chave = Object.keys(rotas).find((k) => path.startsWith(k + '?') || path === k)
+    const corpo = chave ? rotas[chave] : { error: { code: 800 } }
+    const quota = (corpo as { error?: { code?: number } })?.error?.code === 4
+    return new Response(JSON.stringify(quota
+      ? { ok: false, status: 429, reason: 'upstream', retryAfterMs: 0 }
+      : { ok: true, data: corpo, fetchedAt: Date.now(), cached: false }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as typeof globalThis.fetch
+  return pedidos
+}
+
+const ARTISTA_27 = {
+  id: 27,
+  name: 'Daft Punk',
+  picture: 'https://api.deezer.com/artist/27/image',
+  picture_small: 'https://cdn-images.dzcdn.net/images/artist/638e69b9caaf9f9f3f8826febea7b543/56x56-000000-80-0-0.jpg',
+  nb_album: 36,
+  nb_fan: 5209772,
+}
+
+test('a ficha do artista junta foto, fãs, top e discografia', async () => {
+  const pedidos = responderPorPath({
+    '/artist/27': ARTISTA_27,
+    '/artist/27/top': { data: [{
+      id: 66609426,
+      title: 'Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)',
+      title_short: 'Get Lucky',
+      duration: 248,
+      rank: 954234,
+      explicit_lyrics: false,
+      preview: 'https://cdnt-preview.dzcdn.net/x.mp3?hdnea=exp=1',
+      contributors: [{ id: 27, name: 'Daft Punk' }, { id: 103, name: 'Pharrell Williams' }],
+      artist: { id: 27, name: 'Daft Punk' },
+      album: { id: 6516139, title: 'Get Lucky', md5_image: 'bc49adb87758e0c8c4e508a9c5cce85d' },
+    }, { title: 'sem id, some' }], total: 2 },
+    '/artist/27/albums': { data: [
+      { id: 302127, title: 'Discovery', md5_image: '2e018122cb56986277102d2041a592c8',
+        record_type: 'album', release_date: '2001-03-07', genre_id: 106 },
+      { id: 1, title: 'Sem data', record_type: 'single', release_date: '0000-00-00' },
+    ], total: 36 },
+  })
+
+  const f = await fichaDoArtista('27')
+  assert.equal(f.falhou, false)
+  assert.equal(f.inexistente, false)
+  assert.equal(f.name, 'Daft Punk')
+  assert.equal(f.picture_md5, '638e69b9caaf9f9f3f8826febea7b543')
+  assert.equal(f.nb_fan, 5209772)
+  assert.equal(f.nb_album, 36)
+  assert.equal(f.albums_total, 36, 'o total é o do Deezer, não o que coube na página')
+  assert.deepEqual(f.top, [{
+    deezer_track_id: '66609426',
+    title: 'Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)',
+    deezer_artist_id: '27',
+    artist_name: 'Daft Punk',
+    deezer_album_id: '6516139',
+    album_name: 'Get Lucky',
+    cover_md5: 'bc49adb87758e0c8c4e508a9c5cce85d',
+    duration_seconds: 248,
+    explicit_lyrics: false,
+    rank: 954234,
+    contributors: [{ id: '27', name: 'Daft Punk' }, { id: '103', name: 'Pharrell Williams' }],
+  }])
+  assert.equal(JSON.stringify(f).includes('hdnea'), false, 'a URL assinada da prévia nunca é guardada')
+  assert.deepEqual(f.albums.map((a) => [a.album_name, a.record_type, a.release_date]), [
+    ['Discovery', 'album', '2001-03-07'],
+    ['Sem data', 'single', null],
+  ])
+  assert.deepEqual(pedidos.sort(), ['/artist/27', '/artist/27/albums?limit=100&index=0', '/artist/27/top?limit=99'])
+})
+
+test('artista sem foto no Deezer fica sem md5, não com um md5 vazio', async () => {
+  responderPorPath({
+    '/artist/5': { id: 5, name: 'Sem Foto', picture_small: 'https://cdn-images.dzcdn.net/images/artist//56x56-000000-80-0-0.jpg', nb_fan: 3 },
+    '/artist/5/top': { data: [], total: 0 },
+    '/artist/5/albums': { data: [], total: 0 },
+  })
+  const f = await fichaDoArtista('5')
+  assert.equal(f.falhou, false)
+  assert.equal(f.picture_md5, null)
+  assert.deepEqual(f.top, [])
+})
+
+test('artista que saiu do Deezer é resposta, e não gasta as outras duas chamadas', async () => {
+  const pedidos = responderPorPath({ '/artist/9': SEM_DADOS })
+  const f = await fichaDoArtista('9')
+  assert.equal(f.falhou, false)
+  assert.equal(f.inexistente, true)
+  assert.deepEqual(pedidos, ['/artist/9'])
+})
+
+test('top e discografia sem dados são listas vazias, não falha', async () => {
+  responderPorPath({ '/artist/7': { id: 7, name: 'Pequeno' }, '/artist/7/top': SEM_DADOS, '/artist/7/albums': SEM_DADOS })
+  const f = await fichaDoArtista('7')
+  assert.equal(f.falhou, false)
+  assert.deepEqual([f.top, f.albums, f.albums_total], [[], [], 0])
+})
+
+test('uma das três falhando não grava ficha pela metade', async () => {
+  responderPorPath({ '/artist/27': ARTISTA_27, '/artist/27/top': QUOTA, '/artist/27/albums': { data: [], total: 0 } })
+  assert.equal((await fichaDoArtista('27')).falhou, true, 'top com quota')
+
+  responderPorPath({ '/artist/27': ARTISTA_27, '/artist/27/top': { data: [] }, '/artist/27/albums': QUOTA })
+  assert.equal((await fichaDoArtista('27')).falhou, true, 'discografia com quota')
+
+  responderPorPath({ '/artist/27': QUOTA })
+  const f = await fichaDoArtista('27')
+  assert.equal(f.falhou, true, 'artista com quota')
+  assert.equal(f.inexistente, false)
 })

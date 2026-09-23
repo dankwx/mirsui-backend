@@ -59,6 +59,7 @@ import { popScore } from '../lib/stakePoints'
 import { runCatalogDiscovery } from './catalogDiscovery'
 import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
 import { preencherFichaDosAlbuns } from './albumDetails'
+import { preencherFichaDosArtistas } from './artistDetails'
 import {
   listarGeneros,
   chartDoGenero,
@@ -147,6 +148,18 @@ export interface ResultadoObservatorio {
   fichaAlbumConsultados: number
   fichaAlbumFaixas: number
   fichaAlbumFila: number
+  /**
+   * Etapa 4c (migration 040): artistas cuja ficha da página foi pedida ao
+   * Deezer (3 requisições cada), gravada, dada como inexistente ou adiada por
+   * falha. `fichaArtistaFila` é quem estava sem ficha ou com ficha vencida
+   * antes da etapa; ela cai durante a varredura inicial e depois fica na
+   * renovação (catálogo / OBS_FICHA_ARTISTA_DIAS por noite) mais os novos.
+   */
+  fichaArtistaConsultados: number
+  fichaArtistaGravados: number
+  fichaArtistaInexistentes: number
+  fichaArtistaAdiados: number
+  fichaArtistaFila: number
   /** faixas que precisaram do caminho antigo, uma requisição cada */
   isrcResolvidosUmAUm: number
   descobertaSementes: number
@@ -216,6 +229,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     fichaAlbumConsultados: 0,
     fichaAlbumFaixas: 0,
     fichaAlbumFila: 0,
+    fichaArtistaConsultados: 0,
+    fichaArtistaGravados: 0,
+    fichaArtistaInexistentes: 0,
+    fichaArtistaAdiados: 0,
+    fichaArtistaFila: 0,
     isrcResolvidosUmAUm: 0,
     descobertaSementes: 0,
     descobertaNovas: 0,
@@ -252,6 +270,12 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // inicial leva uma semana e custa ~12% de uma rodada. Depois dela, a fila é
   // o que chega por rádio e chart, que é bem menos. 0 desliga.
   const limiteFichaAlbum = num('OBS_LIMITE_FICHA_ALBUM', 5_000)
+  // Teto da etapa 4c, em ARTISTAS (3 requisições cada). O catálogo de
+  // 22/09/2026 tem 12.567 artistas: a 2.000 por noite (~6 mil requisições,
+  // ~40 min) a varredura inicial leva uma semana. Depois dela sobra a
+  // renovação (OBS_FICHA_ARTISTA_DIAS) e os artistas novos. 0 desliga.
+  const limiteFichaArtista = num('OBS_LIMITE_FICHA_ARTISTA', 2_000)
+  const diasFichaArtista = Math.max(1, num('OBS_FICHA_ARTISTA_DIAS', 30))
 
   // O orçamento da etapa 3. Este é o único teto do job que NÃO é um freio de
   // emergência: é o mecanismo. Diferente dos OBS_LIMITE_*, cortar aqui não é
@@ -989,6 +1013,24 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: etapa da ficha dos álbuns falhou')
+  }
+
+  // -------------------------------------------------------------------------
+  // 4c. A ficha da página de artista
+  // -------------------------------------------------------------------------
+  // Ver src/jobs/artistDetails.ts. Vem depois da 4b e antes da descoberta:
+  // os artistas que a descoberta trouxer hoje entram na fila amanhã.
+  try {
+    const ficha = await preencherFichaDosArtistas(db, limiteFichaArtista, diasFichaArtista, log)
+    resultado.fichaArtistaFila = ficha.fila
+    resultado.fichaArtistaConsultados = ficha.consultados
+    resultado.fichaArtistaGravados = ficha.gravados
+    resultado.fichaArtistaInexistentes = ficha.inexistentes
+    resultado.fichaArtistaAdiados = ficha.adiados
+    resultado.falhas += ficha.falhas
+  } catch (err) {
+    resultado.falhas++
+    log.error({ err }, 'Observatório: etapa da ficha dos artistas falhou')
   }
 
   // -------------------------------------------------------------------------
