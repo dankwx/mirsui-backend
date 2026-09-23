@@ -138,6 +138,7 @@ begin
 
   t := p->'top'->2;
   if t->>'deezer_track_id' <> '9990000102' then raise exception 'salva sumiu: %', p->'top'; end if;
+  if t->>'isrc' is distinct from 'ZZART0000002' then raise exception 'isrc da salva: %', t; end if;
 
   if jsonb_array_length(p->'albums') <> 2 then raise exception 'álbuns com ficha: %', p->'albums'; end if;
   if p->'albums'->0->>'record_type' <> 'single' then raise exception 'tipo: %', p->'albums'; end if;

@@ -37,7 +37,7 @@
 -- ouvidas são as do Deezer; quando a faixa é medida pelo Observatório, o
 -- ISRC, a data e a audiência saem da medição do dia, a mesma da curva.
 -- Faixas medidas que o top do Deezer não traz (a obscura que alguém salvou)
--- entram na lista pelo rank. Sem ficha, a página mostra o recorte do
+-- entram também, ordenadas pelo rank. Sem ficha, a página mostra o recorte do
 -- catálogo, como na 038.
 --
 -- Os convidados (feat.) entram no fim da fila: é para eles que os links
@@ -306,7 +306,9 @@ as $$
     left join public.observed_tracks o on o.deezer_track_id = t.item->>'deezer_track_id'
     where t.item->>'deezer_track_id' is not null
   ),
-  -- Medidas que o top do Deezer não traz.
+  -- Medidas que o top do Deezer não traz. Entram todas (até 99), além das 99
+  -- do Deezer: é aqui que mora a faixa obscura que alguém salvou, e cortar
+  -- a lista pelo rank a tiraria também do "quem já garimpou".
   so_do_catalogo as (
     select
       c.deezer_track_id, c.isrc, c.title, c.artist_name, c.deezer_artist_id,
@@ -318,10 +320,9 @@ as $$
     where not exists (select 1 from do_deezer d where d.deezer_track_id = c.deezer_track_id)
   ),
   top as (
-    select *
-    from (select * from do_deezer union all select * from so_do_catalogo) u
-    order by u.rank desc nulls last, u.ordem nulls last, u.deezer_track_id
-    limit 99
+    select * from do_deezer
+    union all
+    select * from so_do_catalogo
   ),
   album_do_catalogo as (
     select distinct on (o.deezer_album_id)
