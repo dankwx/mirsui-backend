@@ -156,6 +156,26 @@ Como foi publicado:
   campos só chegam na medição da noite, que agora mede todo o catálogo todo
   dia. A data chega pela ficha dos álbuns ou pela medição por `/track`.
 
+### Conferência de 23/09/2026
+
+- **Rodada:** 05:00–10:01, 48.883 requisições, 98.092 de 98.093 faixas
+  medidas (1 adiada por um 502 isolado), zero 403 e zero bloqueios. A etapa
+  4b consultou 5.000 álbuns (11.687 faixas; fila de 26.116 depois).
+- **Banco:** das 109.862 faixas ativas, 100% com duração e prévia conhecida,
+  96,8% com data, 64,2% com gênero.
+- **Site:** página de faixa do catálogo sem chamada ao Deezer, com duração e
+  data na ficha.
+- **O que não caiu:** o site continua gastando ~1.000 chamadas por hora ao
+  Deezer, o mesmo ritmo de antes. Não são as páginas do catálogo: é o
+  `Amzn-SearchBot` (buscador da Amazon; o robots bloqueia o `Amazonbot`, que é
+  outro) percorrendo ~560 páginas de faixa por hora, todas **fora** do
+  catálogo, por `/track/<id do Deezer>` e `/track/<isrc>`. São URLs que ele
+  conheceu quando a página de artista e a busca linkavam o top ao vivo do
+  Deezer. Cada uma custa até 3 chamadas. A premissa "faixa fora do catálogo é
+  caminho raro" (item 5 acima) estava errada para robôs. Hoje isso ocupa
+  ~0,3 das 3 req/s e não atrapalhou a medição, mas o espaço de URLs é
+  ilimitado.
+
 ## 2. Acompanhar a primeira rodada com tudo diário (23/09)
 
 É barato e evita surpresa. Nunca rodamos mais de ~27 mil requisições por dia, e
