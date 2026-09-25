@@ -4,6 +4,7 @@ import {
   calcularOrcamentoDescoberta,
   configDescobertaDoAmbiente,
   CONFIG_DESCOBERTA_PADRAO,
+  linhasDeSemelhanca,
   type ConfigDescoberta,
 } from './catalogDiscovery'
 
@@ -112,4 +113,23 @@ test('o orçamento se divide entre as duas fontes sem sobrar nem faltar faixa', 
       assert.ok(album >= 0 && radio >= 0)
     }
   }
+})
+
+// --- o que sobra das respostas (migration 041) ------------------------------
+
+test('o rádio vira uma linha por artista parecido, sem o próprio e sem repetir', () => {
+  const linhas = linhasDeSemelhanca('1', 'radio', ['1', '2', '3', '2', null, '1', '4', undefined, ''])
+  assert.deepEqual(
+    linhas.map((l) => [l.similar_artist_id, l.position]),
+    [['2', 0], ['3', 1], ['4', 2]]
+  )
+  assert.ok(linhas.every((l) => l.deezer_artist_id === '1' && l.source === 'radio'))
+})
+
+test('o /related guarda os 20 na ordem do Deezer', () => {
+  const ids = Array.from({ length: 20 }, (_, i) => String(100 + i))
+  const linhas = linhasDeSemelhanca('7', 'related', ids)
+  assert.equal(linhas.length, 20)
+  assert.equal(linhas[0].similar_artist_id, '100')
+  assert.equal(linhas[19].position, 19)
 })

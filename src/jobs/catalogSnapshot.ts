@@ -60,6 +60,7 @@ import { runCatalogDiscovery } from './catalogDiscovery'
 import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
 import { preencherFichaDosAlbuns } from './albumDetails'
 import { preencherFichaDosArtistas } from './artistDetails'
+import { remontarVizinhanca } from './artistNeighbors'
 import {
   listarGeneros,
   chartDoGenero,
@@ -174,6 +175,18 @@ export interface ResultadoObservatorio {
   descobertaRequisicoesDeAlbum: number
   /** artistas na fronteira da caminhada antes desta rodada */
   descobertaFronteira: number
+  /** pares de artistas que a descoberta guardou das respostas (041) */
+  descobertaSemelhancas: number
+  /**
+   * Etapa 6 (migration 041): a vizinhança dos artistas, de onde saem as
+   * "Parecidas" da página de faixa. Só SQL. `vizinhancaArtistas` é quantos
+   * artistas com página ganharam vizinhos; `vizinhancaSegundo`, quantos
+   * vizinhos vieram do segundo salto.
+   */
+  vizinhancaPares: number
+  vizinhancaArtistas: number
+  vizinhancaDiretos: number
+  vizinhancaSegundo: number
   desativadas: number
   falhas: number
 }
@@ -243,6 +256,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     descobertaColhidasPorAlbum: 0,
     descobertaRequisicoesDeAlbum: 0,
     descobertaFronteira: 0,
+    descobertaSemelhancas: 0,
+    vizinhancaPares: 0,
+    vizinhancaArtistas: 0,
+    vizinhancaDiretos: 0,
+    vizinhancaSegundo: 0,
     desativadas: 0,
     falhas: 0,
   }
@@ -276,6 +294,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // renovação (OBS_FICHA_ARTISTA_DIAS) e os artistas novos. 0 desliga.
   const limiteFichaArtista = num('OBS_LIMITE_FICHA_ARTISTA', 2_000)
   const diasFichaArtista = Math.max(1, num('OBS_FICHA_ARTISTA_DIAS', 30))
+  // Etapa 6, em quantas chamadas a vizinhança é remontada. Cada uma precisa
+  // caber nos 8 s do PostgREST; com 8 lotes, ~0,4 s cada no catálogo de
+  // 25/09/2026. Suba se o catálogo passar de ~500 mil faixas. 0 desliga.
+  const lotesVizinhanca = num('OBS_VIZINHANCA_LOTES', 8)
 
   // O orçamento da etapa 3. Este é o único teto do job que NÃO é um freio de
   // emergência: é o mecanismo. Diferente dos OBS_LIMITE_*, cortar aqui não é
@@ -1049,10 +1071,28 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     resultado.descobertaColhidasPorAlbum = descoberta.albumFaixasColhidas
     resultado.descobertaRequisicoesDeAlbum = descoberta.albumRequisicoes
     resultado.descobertaFronteira = descoberta.fronteiraAntes
+    resultado.descobertaSemelhancas = descoberta.semelhancas
     resultado.pontos += descoberta.pontos
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: descoberta de faixas falhou')
+  }
+
+  // -------------------------------------------------------------------------
+  // 6. A vizinhança dos artistas
+  // -------------------------------------------------------------------------
+  // Ver src/jobs/artistNeighbors.ts. Vem depois da descoberta para já somar
+  // o que ela guardou hoje. Só SQL: não passa pelo gateway.
+  try {
+    const vizinhanca = await remontarVizinhanca(db, lotesVizinhanca, log)
+    resultado.vizinhancaPares = vizinhanca.pares
+    resultado.vizinhancaArtistas = vizinhanca.artistas
+    resultado.vizinhancaDiretos = vizinhanca.diretos
+    resultado.vizinhancaSegundo = vizinhanca.segundo
+    resultado.falhas += vizinhanca.falhas
+  } catch (err) {
+    resultado.falhas++
+    log.error({ err }, 'Observatório: etapa da vizinhança falhou')
   }
 
   const deezer = contadoresDeezer()

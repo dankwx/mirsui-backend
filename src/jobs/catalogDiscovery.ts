@@ -28,6 +28,12 @@
 // `origin_list` guarda a procedência — em ~60 dias
 // `select * from discovery_source_report()` decide o corte com dado em vez de
 // palpite.
+//
+// O QUE SOBRA DAS RESPOSTAS (migration 041)
+// Cada rádio traz ~15 faixas de vários artistas e cada /related traz 20
+// artistas; a descoberta usa uma faixa e três artistas. O resto vai para
+// `artist_similarity`, de onde a rodada monta as "Parecidas" da página de
+// faixa. Zero requisições a mais: é a mesma resposta, guardada inteira.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from '../lib/supabase'
@@ -106,6 +112,9 @@ export interface ResultadoDescoberta {
   fronteiraAntes: number
   fronteiraNovos: number
   fronteiraSementes: number
+  // --- o que sobrou das respostas (041) ---
+  /** pares de artistas gravados em artist_similarity, das duas fontes */
+  semelhancas: number
 }
 
 export const CONFIG_DESCOBERTA_PADRAO: ConfigDescoberta = {
@@ -269,7 +278,68 @@ const vazio = (catalogoAtivoAntes = 0, orcamento = 0): ResultadoDescoberta => ({
   fronteiraAntes: 0,
   fronteiraNovos: 0,
   fronteiraSementes: 0,
+  semelhancas: 0,
 })
+
+/** Uma linha de `artist_similarity` (migration 041). */
+export interface LinhaDeSemelhanca {
+  deezer_artist_id: string
+  similar_artist_id: string
+  source: 'related' | 'radio'
+  /** a ordem na resposta, contando só artistas distintos (0 = o primeiro) */
+  position: number
+}
+
+/**
+ * O que uma resposta do Deezer diz sobre quem se parece com `artistId`.
+ *
+ * O rádio mistura faixas do próprio artista com as dos parecidos, e o mesmo
+ * artista aparece em várias faixas: fica a primeira aparição de cada um, sem o
+ * próprio. No /related a ordem é a do Deezer, que põe o mais parecido antes.
+ */
+export function linhasDeSemelhanca(
+  artistId: string,
+  source: LinhaDeSemelhanca['source'],
+  ids: (string | null | undefined)[]
+): LinhaDeSemelhanca[] {
+  const vistos = new Set<string>()
+  const linhas: LinhaDeSemelhanca[] = []
+  for (const id of ids) {
+    if (!id || id === artistId || vistos.has(id)) continue
+    vistos.add(id)
+    linhas.push({
+      deezer_artist_id: artistId,
+      similar_artist_id: id,
+      source,
+      position: linhas.length,
+    })
+  }
+  return linhas
+}
+
+/**
+ * Grava o que sobrou das respostas. Nunca lança: é um subproduto, e perder a
+ * semelhança de uma noite não pode custar a descoberta dela. Sem a 041
+ * aplicada a RPC não existe e isto só registra o erro.
+ */
+async function gravarSemelhancas(
+  db: SupabaseClient,
+  logger: Log,
+  linhas: LinhaDeSemelhanca[]
+): Promise<number> {
+  let gravadas = 0
+  for (let i = 0; i < linhas.length; i += 1_000) {
+    const { data, error } = await db.rpc('record_artist_similarity', {
+      p_rows: linhas.slice(i, i + 1_000),
+    })
+    if (error) {
+      logger.error({ err: error, linhas: linhas.length }, 'Descoberta: falha ao gravar semelhanças')
+      break
+    }
+    gravadas += Number(data) || 0
+  }
+  return gravadas
+}
 
 // ---------------------------------------------------------------------------
 // Fonte B — caminhada por artista relacionado e álbum
@@ -336,6 +406,7 @@ async function caminhadaPorAlbum(
     )
 
     const jaVistos = new Set<string>()
+    const semelhancas: LinhaDeSemelhanca[] = []
     for (const { artistId, grupo, artistas, falhou } of respostas) {
       if (falhou) {
         // Falha transitória não queima a semente: ela volta amanhã.
@@ -343,6 +414,12 @@ async function caminhadaPorAlbum(
         continue
       }
       for (const s of grupo) sementesConsumidas.push(s.deezer_track_id)
+
+      // Os 20, antes do filtro de fãs: o artista grande não entra na
+      // fronteira, mas continua parecido.
+      semelhancas.push(
+        ...linhasDeSemelhanca(artistId, 'related', artistas.map((a) => a.deezer_artist_id))
+      )
 
       // O dial: só quem está abaixo do teto de fãs, do menos popular para o
       // mais. Acima do teto o artista já chega sozinho por chart ou por save.
@@ -378,6 +455,8 @@ async function caminhadaPorAlbum(
       if (error) throw error
       resultado.fronteiraNovos = Number((data as { fronteira?: number })?.fronteira) || 0
     }
+
+    resultado.semelhancas += await gravarSemelhancas(db, logger, semelhancas)
   }
 
   // --- 2. Colher a fronteira ----------------------------------------------
@@ -666,6 +745,16 @@ export async function runCatalogDiscovery(
     )
     radios.push(...bloco)
   }
+
+  resultado.semelhancas += await gravarSemelhancas(
+    db,
+    logger,
+    radios.flatMap(({ artistId, radio }) =>
+      radio.falhou
+        ? []
+        : linhasDeSemelhanca(artistId, 'radio', radio.faixas.map((f) => f.deezer_artist_id))
+    )
+  )
 
   const candidatas: Candidata[] = []
   const paisMarcados: string[] = semArtista.map((s) => s.deezer_track_id)
