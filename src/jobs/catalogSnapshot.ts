@@ -56,7 +56,7 @@
 
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
-import { runCatalogDiscovery } from './catalogDiscovery'
+import { runCatalogDiscovery, GENEROS_FORA_DA_COLETA } from './catalogDiscovery'
 import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
 import { preencherFichaDosAlbuns } from './albumDetails'
 import { preencherFichaDosArtistas } from './artistDetails'
@@ -177,6 +177,8 @@ export interface ResultadoObservatorio {
   descobertaFronteira: number
   /** pares de artistas que a descoberta guardou das respostas (041) */
   descobertaSemelhancas: number
+  /** álbuns que a caminhada deixou de colher por gênero fora da coleta */
+  descobertaAlbunsForaDoGenero: number
   /**
    * Etapa 6 (migration 041): a vizinhança dos artistas, de onde saem as
    * "Parecidas" da página de faixa. Só SQL. `vizinhancaArtistas` é quantos
@@ -257,6 +259,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     descobertaRequisicoesDeAlbum: 0,
     descobertaFronteira: 0,
     descobertaSemelhancas: 0,
+    descobertaAlbunsForaDoGenero: 0,
     vizinhancaPares: 0,
     vizinhancaArtistas: 0,
     vizinhancaDiretos: 0,
@@ -389,9 +392,13 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     // O gênero 0 ("Todos") é o chart global e vale sempre; os demais vêm todos.
     // Gênero é barato: uma requisição cobre até 300 faixas, e o Deezer tem
     // pouco mais de vinte deles — cortar em 40 nunca economizou nada de real.
+    // O chart de um gênero fora da coleta (a Clássica, desde 25/09/2026) não
+    // é lido: ele só traria faixas desse gênero. As que já estão no catálogo
+    // continuam medidas pela etapa 3.
+    const fora = new Set(GENEROS_FORA_DA_COLETA.map((g) => g.id))
     const alvo = [
       { id: 0, name: 'Todos' },
-      ...generos.filter((g) => g.id !== 0).slice(0, maxGeneros),
+      ...generos.filter((g) => g.id !== 0 && !fora.has(g.id)).slice(0, maxGeneros),
     ]
 
     const doChart: FaixaObservada[] = []
@@ -1072,6 +1079,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     resultado.descobertaRequisicoesDeAlbum = descoberta.albumRequisicoes
     resultado.descobertaFronteira = descoberta.fronteiraAntes
     resultado.descobertaSemelhancas = descoberta.semelhancas
+    resultado.descobertaAlbunsForaDoGenero = descoberta.albunsForaDoGenero
     resultado.pontos += descoberta.pontos
   } catch (err) {
     resultado.falhas++

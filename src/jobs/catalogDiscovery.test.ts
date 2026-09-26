@@ -5,6 +5,7 @@ import {
   configDescobertaDoAmbiente,
   CONFIG_DESCOBERTA_PADRAO,
   linhasDeSemelhanca,
+  separarPorGenero,
   type ConfigDescoberta,
 } from './catalogDiscovery'
 
@@ -132,4 +133,35 @@ test('o /related guarda os 20 na ordem do Deezer', () => {
   assert.equal(linhas.length, 20)
   assert.equal(linhas[0].similar_artist_id, '100')
   assert.equal(linhas[19].position, 19)
+})
+
+// --- gêneros fora da coleta (25/09/2026) ------------------------------------
+// 98 é a Clássica no Deezer. O que importa: não barrar o que não se sabe, e só
+// esgotar o artista quando a página inteira é do gênero.
+
+test('a caminhada pula o álbum clássico e colhe o resto da página', () => {
+  const r = separarPorGenero([
+    { id: 'a', genre_id: 98 },
+    { id: 'b', genre_id: 132 },
+    { id: 'c', genre_id: 98 },
+  ])
+  assert.deepEqual(r.colher.map((a) => a.id), ['b'])
+  assert.deepEqual(r.fora.map((a) => a.id), ['a', 'c'])
+  assert.equal(r.artistaFora, false)
+})
+
+test('página inteira de clássica esgota o artista', () => {
+  const r = separarPorGenero([{ genre_id: 98 }, { genre_id: 98 }])
+  assert.equal(r.colher.length, 0)
+  assert.equal(r.artistaFora, true)
+})
+
+test('álbum sem gênero é colhido, e sozinho não esgota ninguém', () => {
+  const r = separarPorGenero([{ genre_id: null }, { genre_id: 98 }])
+  assert.equal(r.colher.length, 1)
+  assert.equal(r.artistaFora, false)
+})
+
+test('página vazia não é página de clássica', () => {
+  assert.equal(separarPorGenero([]).artistaFora, false)
 })

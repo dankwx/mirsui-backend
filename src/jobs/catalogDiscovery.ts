@@ -34,6 +34,13 @@
 // artistas; a descoberta usa uma faixa e três artistas. O resto vai para
 // `artist_similarity`, de onde a rodada monta as "Parecidas" da página de
 // faixa. Zero requisições a mais: é a mesma resposta, guardada inteira.
+//
+// GÊNEROS FORA DA COLETA (25/09/2026)
+// Música clássica não entra mais por coleta automática, só por save. Contado
+// nesse dia: 26.921 faixas clássicas ativas (21% do catálogo), nenhuma salva
+// por ninguém; 88% vieram da caminhada, 11% do rádio, 1% do chart 98. O ciclo
+// se alimentava sozinho: faixa clássica vira semente, o /related e o rádio
+// dela devolvem mais clássica. Ver GENEROS_FORA_DA_COLETA.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from '../lib/supabase'
@@ -112,6 +119,10 @@ export interface ResultadoDescoberta {
   fronteiraAntes: number
   fronteiraNovos: number
   fronteiraSementes: number
+  /** álbuns de gênero fora da coleta que a caminhada deixou de colher */
+  albunsForaDoGenero: number
+  /** artistas esgotados porque a página inteira era de gênero fora */
+  artistasForaDoGenero: number
   // --- o que sobrou das respostas (041) ---
   /** pares de artistas gravados em artist_similarity, das duas fontes */
   semelhancas: number
@@ -134,6 +145,49 @@ export const CONFIG_DESCOBERTA_PADRAO: ConfigDescoberta = {
   relacionadosPorSemente: 3,
   fronteiraMinima: 50,
   albunsPorArtista: 6,
+}
+
+/**
+ * Gêneros que a coleta automática não traz. O save de um usuário continua
+ * trazendo: a etapa 2 do snapshot (acervo) não passa por aqui.
+ *
+ * O id é o do Deezer, que é o que o chart e a discografia trazem. O nome é o
+ * que fica em `observed_tracks.genre` (o vocabulário de /genre), e é por ele
+ * que a faixa já catalogada deixa de ser semente.
+ *
+ * O filtro tem três pontos, porque são três portas de entrada:
+ *   chart      o chart do gênero sai da varredura (catalogSnapshot.ts)
+ *   caminhada  o álbum do gênero não é colhido; página inteira dele esgota
+ *              o artista (separarPorGenero)
+ *   sementes   faixa do gênero não vira semente, nem do rádio nem da
+ *              fronteira (lerSementes)
+ * O rádio não traz gênero, então a faixa de rádio só é barrada pela semente.
+ * Medido em 25/09/2026: 86% da clássica vinda do rádio tinha semente clássica.
+ */
+export const GENEROS_FORA_DA_COLETA: readonly { id: number; nome: string }[] = [
+  { id: 98, nome: 'Clássica' },
+]
+
+const idsForaDaColeta = new Set(GENEROS_FORA_DA_COLETA.map((g) => g.id))
+
+/**
+ * Divide uma página da discografia em álbuns a colher e álbuns de gênero fora
+ * da coleta. Álbum sem gênero é colhido: não saber não é motivo para barrar.
+ *
+ * `artistaFora` = a página tinha o que colher e era toda de gênero fora. É o
+ * artista clássico: esgotá-lo agora custa a página que já foi paga, em vez de
+ * uma requisição por noite até o fim de uma discografia que nunca vai render.
+ */
+export function separarPorGenero<A extends { genre_id: number | null }>(
+  albuns: A[]
+): { colher: A[]; fora: A[]; artistaFora: boolean } {
+  const colher: A[] = []
+  const fora: A[] = []
+  for (const a of albuns) {
+    if (a.genre_id != null && idsForaDaColeta.has(a.genre_id)) fora.push(a)
+    else colher.push(a)
+  }
+  return { colher, fora, artistaFora: fora.length > 0 && colher.length === 0 }
 }
 
 const inteiroNaoNegativo = (valor: string | undefined, padrao: number) => {
@@ -245,6 +299,11 @@ async function lerSementes(db: SupabaseClient, limite: number): Promise<Semente[
       .select('deezer_track_id, deezer_artist_id')
       .eq('active', true)
       .is('recommendation_checked_at', null)
+      // Semente de gênero fora da coleta traria mais do mesmo gênero. Ela fica
+      // na fila sem ser marcada, e volta a valer se o gênero sair da lista. O
+      // `is.null` é obrigatório: `not in` sozinho descartaria a faixa sem
+      // gênero, que é quase todo o rádio da noite anterior.
+      .or(`genre.is.null,genre.not.in.(${GENEROS_FORA_DA_COLETA.map((g) => `"${g.nome}"`).join(',')})`)
       .order('added_at', { ascending: true })
       .order('deezer_track_id', { ascending: true })
       .range(offset, offset + tamanho - 1)
@@ -278,6 +337,8 @@ const vazio = (catalogoAtivoAntes = 0, orcamento = 0): ResultadoDescoberta => ({
   fronteiraAntes: 0,
   fronteiraNovos: 0,
   fronteiraSementes: 0,
+  albunsForaDoGenero: 0,
+  artistasForaDoGenero: 0,
   semelhancas: 0,
 })
 
@@ -509,10 +570,15 @@ async function caminhadaPorAlbum(
     // de artista pequeno é onde a tese "achar antes de estourar" mora.
     const uteis = albuns.filter((a) => a.record_type !== 'compilation')
 
+    // Álbum de gênero fora da coleta nem é pedido: o gênero vem na
+    // discografia, que já foi paga. Ver GENEROS_FORA_DA_COLETA.
+    const { colher, fora, artistaFora } = separarPorGenero(uteis)
+    resultado.albunsForaDoGenero += fora.length
+
     const faixasPorAlbum = await Promise.all(
-      uteis.map(async (album) => ({ album, ...(await faixasDoAlbum(album.deezer_album_id)) }))
+      colher.map(async (album) => ({ album, ...(await faixasDoAlbum(album.deezer_album_id)) }))
     )
-    resultado.albumRequisicoes += uteis.length
+    resultado.albumRequisicoes += colher.length
 
     for (const { album, faixas, falhou: falhouAlbum } of faixasPorAlbum) {
       if (falhouAlbum) {
@@ -560,14 +626,16 @@ async function caminhadaPorAlbum(
     }
 
     const consumidos = artista.next_album_index + albuns.length
+    const esgotado = artistaFora || consumidos >= total
     progresso.push({
       deezer_artist_id: artista.deezer_artist_id,
       next_album_index: consumidos,
       albums_total: total,
-      exhausted: consumidos >= total,
+      exhausted: esgotado,
     })
     resultado.albumArtistasColhidos++
-    if (consumidos >= total) resultado.albumArtistasExauridos++
+    if (artistaFora) resultado.artistasForaDoGenero++
+    if (esgotado) resultado.albumArtistasExauridos++
   }
 
   // --- 3. Gravar ------------------------------------------------------------
@@ -595,6 +663,8 @@ async function caminhadaPorAlbum(
       requisicoes: resultado.albumRequisicoes,
       colhidas: resultado.albumFaixasColhidas,
       novas: resultado.albumNovas,
+      albunsForaDoGenero: resultado.albunsForaDoGenero,
+      artistasForaDoGenero: resultado.artistasForaDoGenero,
     },
     'Descoberta: caminhada por álbum concluída'
   )
