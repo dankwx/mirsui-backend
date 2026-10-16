@@ -1,4 +1,4 @@
-import { faixasDoAlbum, type FaixaObservada } from '../lib/deezerCatalog'
+import { faixasDaPlaylist, faixasDoAlbum, type FaixaObservada } from '../lib/deezerCatalog'
 
 export interface LinhaParaMedir {
   deezer_track_id: string
@@ -90,5 +90,80 @@ export async function* medirPorAlbum(
       }
     }
     yield { medidas, individuais, albunsConsultados }
+  }
+}
+
+/**
+ * Mede a fila pelas playlists de medição, antes do caminho por álbum.
+ *
+ * Uma playlist de 2.000 faixas é uma requisição; as mesmas faixas custam
+ * centenas pelo álbum e por /track. O casamento é SÓ pelo id do Deezer: o
+ * TuneMyMusic, que monta as playlists, casa por ISRC e às vezes escolhe outra
+ * edição da mesma música (13% em 16/10/2026), com outro rank. Faixa da
+ * playlist que não está na fila é ignorada; faixa da fila que não veio com o
+ * próprio id, veio sem rank ou veio com `readable: false` fica para o caminho
+ * atual, que é o único autorizado a concluir que uma faixa foi removida.
+ *
+ * Entrega uma playlist por vez, para a gravação acontecer entre elas. Quem
+ * chama tira da fila o que foi medido antes de passar o resto a medirPorAlbum.
+ */
+export async function* medirPorPlaylist(
+  linhas: LinhaParaMedir[],
+  playlists: string[],
+  consultarPlaylist: typeof faixasDaPlaylist = faixasDaPlaylist
+) {
+  const naFila = new Map(linhas.map((r) => [r.deezer_track_id, r]))
+  const medidasAntes = new Set<string>()
+
+  // Duas em voo, no máximo. O gateway tem 4 conexões para todo mundo e uma
+  // página de 2.000 segura a sua por até 5 s: com 4 playlists ao mesmo tempo, a
+  // etapa ocuparia todas e quem abre o site esperaria. São ~156 páginas por
+  // noite, ~6 min assim.
+  const BLOCO = 2
+  for (let i = 0; i < playlists.length; i += BLOCO) {
+    const respostas = await Promise.all(playlists.slice(i, i + BLOCO).map(async (id) => ({
+      id,
+      resposta: await consultarPlaylist(id),
+    })))
+    for (const { id, resposta } of respostas) {
+      const medidas: FaixaObservada[] = []
+      let semRank = 0
+      if (!resposta.falhou) {
+        for (const f of resposta.faixas) {
+          const r = naFila.get(f.deezer_track_id)
+          if (!r || medidasAntes.has(f.deezer_track_id)) continue
+          if (typeof f.rank !== 'number' || !Number.isFinite(f.rank) || f.readable === false) {
+            semRank++
+            continue
+          }
+          medidasAntes.add(f.deezer_track_id)
+          medidas.push({
+            deezer_track_id: r.deezer_track_id,
+            deezer_artist_id: f.deezer_artist_id ?? r.deezer_artist_id,
+            deezer_album_id: f.deezer_album_id ?? r.deezer_album_id,
+            isrc: f.isrc,
+            title: f.title ?? r.title,
+            artist_name: f.artist_name ?? r.artist_name,
+            album_name: f.album_name,
+            cover_md5: f.cover_md5,
+            genre: null,
+            source_list: r.source_list ?? 'chart:0',
+            rank: f.rank,
+            // A faixa da playlist traz duração, explícito e prévia, como a do
+            // álbum; data e participações só /track traz.
+            duration_seconds: f.duration_seconds,
+            explicit_lyrics: f.explicit_lyrics,
+            has_preview: f.has_preview,
+          })
+        }
+      }
+      yield {
+        playlistId: id,
+        falhou: resposta.falhou,
+        lidas: resposta.faixas.length,
+        semRank,
+        medidas,
+      }
+    }
   }
 }

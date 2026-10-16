@@ -11,6 +11,35 @@ test('normaliza busca e paginação, rejeita destinos e caminhos fora da API per
     '/album/1/tracks?limit=999999', '/track/1#x']) assert.throws(() => normalizeDeezerPath(p))
 })
 
+test('playlist de medição aceita 2.000 por página; o resto da API continua em 300', () => {
+  assert.equal(normalizeDeezerPath('/playlist/15864469721/tracks?limit=2000&index=4000'),
+    '/playlist/15864469721/tracks?index=4000&limit=2000')
+  assert.equal(normalizeDeezerPath('/playlist/15864469721'), '/playlist/15864469721')
+  assert.equal(normalizeDeezerPath('/user/6866594521/playlists?limit=100'), '/user/6866594521/playlists?limit=100')
+  for (const p of ['/playlist/1/tracks?limit=2001', '/album/1/tracks?limit=2000', '/playlist/1?limit=2000',
+    '/user/1/playlists?limit=2000', '/user/me/playlists', '/user/1/flow', '/playlist/abc/tracks'])
+    assert.throws(() => normalizeDeezerPath(p), p)
+})
+
+test('página de playlist tem o triplo do timeout e nunca entra no cache', async () => {
+  let calls = 0
+  const gateway = new DeezerGateway({ intervalMs: 1, timeoutMs: 10,
+    fetch: (async (_url, init) => {
+      calls++
+      return new Promise<Response>((resolve, reject) => {
+        const t = setTimeout(() => resolve(json({ data: [{ id: 1, rank: 5 }] })), 18)
+        init!.signal!.addEventListener('abort', () => { clearTimeout(t); reject(new Error('timeout')) }, { once: true })
+      })
+    }) as typeof fetch })
+  const pagina = '/playlist/9/tracks?limit=2000&index=0'
+  assert.ok((await gateway.request(pagina, 'catalog', 0)).ok, 'a página lenta passa com 30 ms')
+  assert.ok((await gateway.request(pagina, 'catalog', 86_400_000)).ok)
+  assert.equal(calls, 2, 'a segunda leitura foi ao Deezer, não ao cache')
+  assert.equal(gateway.snapshot().cacheEntries, 0)
+  const faixa = await gateway.request('/track/1', 'catalog', 0)
+  assert.ok(!faixa.ok && faixa.reason === 'network', 'o resto continua com 10 ms')
+})
+
 test('limite agregado e concorrência valem para prioridades diferentes', async () => {
   const starts: number[] = []
   let active = 0, maxActive = 0

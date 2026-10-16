@@ -6,16 +6,24 @@ export type GatewayReply =
 const BASE = 'https://api.deezer.com'
 const PRIORITIES: DeezerPriority[] = ['interactive', 'interactive', 'stakes', 'interactive', 'catalog', 'stakes', 'interactive']
 
+// The measurement playlists (docs/medicao-por-playlist.md). One page of 2,000
+// tracks is ~4.4 MB and took up to 5 s on 16/10/2026; 5,000 in one page made
+// Deezer itself answer 504 after 10 s. So the limit stops at 2,000, the page
+// gets three times the usual timeout, and it never enters the cache, where it
+// would evict the small entries that serve the site.
+const PLAYLIST_TRACKS = /^\/playlist\/\d+\/tracks(?:\?|$)/
+
 export function normalizeDeezerPath(path: string): string {
   if (!path.startsWith('/') || path.startsWith('//') || path.length > 2048) throw new Error('Invalid Deezer path')
   const url = new URL(path, BASE)
   if (url.origin !== BASE || url.hash || url.username || url.password ||
-      !/^\/(?:genre|search(?:\/(?:track|artist|album))?|track\/(?:\d+|isrc:[A-Za-z0-9]+)|album\/\d+(?:\/tracks)?|artist\/\d+(?:\/(?:top|albums|related|radio))?|chart\/\d+(?:\/(?:tracks|albums|artists|playlists))?)$/.test(url.pathname)) {
+      !/^\/(?:genre|search(?:\/(?:track|artist|album))?|track\/(?:\d+|isrc:[A-Za-z0-9]+)|album\/\d+(?:\/tracks)?|artist\/\d+(?:\/(?:top|albums|related|radio))?|chart\/\d+(?:\/(?:tracks|albums|artists|playlists))?|playlist\/\d+(?:\/tracks)?|user\/\d+\/playlists)$/.test(url.pathname)) {
     throw new Error('Invalid Deezer path')
   }
+  const maxLimit = PLAYLIST_TRACKS.test(url.pathname) ? 2000 : 300
   for (const [key, value] of url.searchParams) {
     if (!['q', 'limit', 'index', 'order'].includes(key)) throw new Error('Invalid Deezer parameter')
-    if (['limit', 'index'].includes(key) && (!/^\d+$/.test(value) || Number(value) > (key === 'limit' ? 300 : 1_000_000))) {
+    if (['limit', 'index'].includes(key) && (!/^\d+$/.test(value) || Number(value) > (key === 'limit' ? maxLimit : 1_000_000))) {
       throw new Error('Invalid Deezer pagination')
     }
   }
@@ -166,8 +174,9 @@ export class DeezerGateway {
     this.stats.upstream++
     this.stats.byPriority[work.priority]++
     try {
+      const timeoutMs = (this.options.timeoutMs ?? 10_000) * (PLAYLIST_TRACKS.test(work.path) ? 3 : 1)
       const response = await this.fetcher(BASE + work.path, { redirect: 'error',
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? 10_000) })
+        signal: AbortSignal.timeout(timeoutMs) })
       if (response.status === 403 || response.status === 429) {
         const header = response.headers.get('retry-after')
         const seconds = Number(header)
@@ -196,7 +205,7 @@ export class DeezerGateway {
         this.options.savePause?.({ until: 0, waves: 0 })
       }
       const fetchedAt = Date.now()
-      if (!data.error) {
+      if (!data.error && !PLAYLIST_TRACKS.test(work.path)) {
         const bytes = Buffer.byteLength(JSON.stringify(data))
         const old = this.cache.get(work.path)
         if (old) { this.cacheBytes -= old.bytes; this.cache.delete(work.path) }

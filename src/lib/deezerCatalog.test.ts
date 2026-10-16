@@ -6,6 +6,8 @@ import {
   albunsDoArtista,
   buscarFaixa,
   faixasDoAlbum,
+  faixasDaPlaylist,
+  playlistsDoUsuario,
   fichaDoAlbum,
   fichaDoArtista,
 } from './deezerCatalog'
@@ -286,4 +288,78 @@ test('uma das três falhando não grava ficha pela metade', async () => {
   const f = await fichaDoArtista('27')
   assert.equal(f.falhou, true, 'artista com quota')
   assert.equal(f.inexistente, false)
+})
+
+// Playlists de medição (docs/medicao-por-playlist.md). A paginação é a mesma
+// do álbum, e a regra também: uma página que falha derruba a lista inteira,
+// porque meia playlist não diz nada sobre a faixa que não apareceu.
+const API = 'https://api.deezer.com'
+const pagina = (ids: number[], total: number, next?: string) => ({
+  data: ids.map((id) => ({
+    id, title: `F${id}`, rank: id * 10, isrc: `ISRC${id}`, duration: 180, readable: id !== 3,
+    preview: 'https://cdnt-preview.dzcdn.net/x.mp3', explicit_lyrics: false,
+    artist: { id: 7, name: 'Artista' }, album: { id: 70, title: 'Disco', md5_image: 'a'.repeat(32) },
+  })),
+  total,
+  ...(next ? { next } : {}),
+})
+
+test('playlist em três páginas vem inteira, com álbum, capa e readable', async () => {
+  const pedidos = responderPorPath({
+    '/playlist/9/tracks?limit=2000&index=0': pagina([1, 2], 5, `${API}/playlist/9/tracks?limit=2000&index=2`),
+    '/playlist/9/tracks?limit=2000&index=2': pagina([3, 4], 5, `${API}/playlist/9/tracks?limit=2000&index=4`),
+    '/playlist/9/tracks?limit=2000&index=4': pagina([5], 5),
+  })
+  const r = await faixasDaPlaylist('9')
+  assert.equal(r.falhou, false)
+  assert.equal(pedidos.length, 3)
+  assert.deepEqual(r.faixas.map((f) => [f.deezer_track_id, f.rank]), [['1', 10], ['2', 20], ['3', 30], ['4', 40], ['5', 50]])
+  const [um, , tres] = r.faixas
+  assert.equal(um.deezer_album_id, '70')
+  assert.equal(um.album_name, 'Disco')
+  assert.equal(um.cover_md5, 'a'.repeat(32))
+  assert.equal(um.has_preview, true)
+  assert.equal(um.readable, true)
+  assert.equal(tres.readable, false)
+})
+
+test('playlist com uma página que falha no meio é falha inteira', async () => {
+  responderPorPath({
+    '/playlist/9/tracks?limit=2000&index=0': pagina([1, 2], 5, `${API}/playlist/9/tracks?limit=2000&index=2`),
+  })
+  assert.deepEqual(await faixasDaPlaylist('9'), { faixas: [], falhou: true })
+})
+
+test('playlist que declara mais faixas do que entregou é falha', async () => {
+  responderPorPath({ '/playlist/9/tracks?limit=2000&index=0': pagina([1, 2], 5) })
+  assert.equal((await faixasDaPlaylist('9')).falhou, true)
+})
+
+test('next apontando para outro recurso não é seguido', async () => {
+  const pedidos = responderPorPath({
+    '/playlist/9/tracks?limit=2000&index=0': pagina([1], 2, `${API}/playlist/10/tracks?limit=2000&index=1`),
+  })
+  assert.equal((await faixasDaPlaylist('9')).falhou, true)
+  assert.equal(pedidos.length, 1)
+})
+
+test('álbum em duas páginas continua vindo inteiro', async () => {
+  responderPorPath({
+    '/album/70/tracks?limit=300&index=0': pagina([1, 2], 3, `${API}/album/70/tracks?limit=300&index=2`),
+    '/album/70/tracks?limit=300&index=2': pagina([3], 3),
+  })
+  const r = await faixasDoAlbum('70')
+  assert.equal(r.falhou, false)
+  assert.deepEqual(r.faixas.map((f) => f.deezer_track_id), ['1', '2', '3'])
+})
+
+test('as playlists do perfil trazem quem criou cada uma', async () => {
+  responderPorPath({ '/user/68/playlists?limit=100&index=0': { data: [
+    { id: 15864469721, title: 'Mirsui 004', nb_tracks: 2000, public: true, creator: { id: 68 } },
+    { id: 1, title: 'Seguida', nb_tracks: 50, public: true, creator: { id: 5 } },
+  ], total: 2 } })
+  const r = await playlistsDoUsuario('68')
+  assert.equal(r.falhou, false)
+  assert.deepEqual(r.playlists.map((p) => [p.deezer_playlist_id, p.creator_id, p.nb_tracks]),
+    [['15864469721', '68', 2000], ['1', '5', 50]])
 })

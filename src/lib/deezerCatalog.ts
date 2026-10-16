@@ -50,6 +50,8 @@ interface DeezerFaixa {
   release_date?: string
   /** só em /track/{id} e /track/isrc:X: principal + participações, em ordem */
   contributors?: DeezerArtista[]
+  /** false quando a faixa não toca mais no Deezer; vem nas listas de playlist */
+  readable?: boolean
   artist?: DeezerArtista
   album?: DeezerAlbum
   error?: DeezerErro
@@ -384,6 +386,41 @@ export interface FaixaDoAlbum extends CamposFixos {
 }
 
 /**
+ * Todas as páginas de uma lista do Deezer, ou null se não deu para ler todas.
+ *
+ * null é "não consegui perguntar", nunca "a lista é vazia": uma lista
+ * declaradamente incompleta não confirma a ausência de nada.
+ */
+async function listaInteira<T>(path: string, limite: number): Promise<T[] | null> {
+  const todas: T[] = []
+  let index = 0
+  for (;;) {
+    const res = await dz<DeezerLista<T>>(`${path}?limit=${limite}&index=${index}`)
+    if (!res || res.error || !Array.isArray(res.data)) return null
+    todas.push(...res.data)
+    if (!res.next) {
+      if (typeof res.total === 'number' && res.total > todas.length) return null
+      return todas
+    }
+    // Não seguimos URLs arbitrárias. Extraímos somente o índice crescente do
+    // mesmo recurso e reconstruímos a chamada no host fixo da API.
+    try {
+      const next = new URL(res.next, BASE)
+      const rawIndex = next.searchParams.get('index')
+      const nextIndex = Number(rawIndex)
+      if (next.hostname !== 'api.deezer.com' || next.pathname !== path ||
+          !rawIndex || !Number.isSafeInteger(nextIndex) || nextIndex <= index ||
+          res.data.length === 0) {
+        return null
+      }
+      index = nextIndex
+    } catch {
+      return null
+    }
+  }
+}
+
+/**
  * As faixas de um álbum, com ISRC e rank, numa requisição só.
  *
  * É a alavanca do item 5 da análise de escala (§4.2): a etapa de ISRC gastava
@@ -402,40 +439,11 @@ export interface FaixaDoAlbum extends CamposFixos {
 export async function faixasDoAlbum(
   deezerAlbumId: string
 ): Promise<{ faixas: FaixaDoAlbum[]; falhou: boolean }> {
-  const path = `/album/${encodeURIComponent(deezerAlbumId)}/tracks`
-  const todas: DeezerFaixa[] = []
-  let index = 0
-  for (;;) {
-    const res = await dz<DeezerLista<DeezerFaixa>>(
-      `${path}?limit=300&index=${index}`
-    )
-    if (!res || res.error || !Array.isArray(res.data)) {
-      return { faixas: [], falhou: true }
-    }
-    todas.push(...res.data)
-    if (!res.next) {
-      // Uma lista declaradamente incompleta não confirma ausência de faixa.
-      if (typeof res.total === 'number' && res.total > todas.length) {
-        return { faixas: [], falhou: true }
-      }
-      break
-    }
-    // Não seguimos URLs arbitrárias. Extraímos somente o índice crescente do
-    // mesmo recurso e reconstruímos a chamada no host fixo da API.
-    try {
-      const next = new URL(res.next, BASE)
-      const rawIndex = next.searchParams.get('index')
-      const nextIndex = Number(rawIndex)
-      if (next.hostname !== 'api.deezer.com' || next.pathname !== path ||
-          !rawIndex || !Number.isSafeInteger(nextIndex) || nextIndex <= index ||
-          res.data.length === 0) {
-        return { faixas: [], falhou: true }
-      }
-      index = nextIndex
-    } catch {
-      return { faixas: [], falhou: true }
-    }
-  }
+  const todas = await listaInteira<DeezerFaixa>(
+    `/album/${encodeURIComponent(deezerAlbumId)}/tracks`,
+    300
+  )
+  if (!todas) return { faixas: [], falhou: true }
 
   const faixas = todas.flatMap((t) => {
     if (t.id == null) return []
@@ -453,6 +461,94 @@ export async function faixasDoAlbum(
   })
 
   return { faixas, falhou: false }
+}
+
+export interface FaixaDaPlaylist extends FaixaDoAlbum {
+  deezer_album_id: string | null
+  album_name: string | null
+  cover_md5: string | null
+  /** false: o Deezer diz que a faixa não toca mais; null: o campo não veio */
+  readable: boolean | null
+}
+
+/**
+ * As faixas de uma playlist de medição, 2.000 por requisição.
+ *
+ * É o caminho mais barato que existe para medir (docs/medicao-por-playlist.md):
+ * o rank de cada faixa vem igual ao de `/track/{id}` (489 de 489 conferidas em
+ * 22/09 e 16/10/2026). A página de 2.000 é a maior que o Deezer monta a tempo:
+ * com 5.000 ele mesmo responde 504.
+ *
+ * Mesma regra de `faixasDoAlbum`: `falhou` é "não consegui ler a playlist
+ * inteira", e nunca confirma que uma faixa saiu dela.
+ */
+export async function faixasDaPlaylist(
+  deezerPlaylistId: string
+): Promise<{ faixas: FaixaDaPlaylist[]; falhou: boolean }> {
+  const todas = await listaInteira<DeezerFaixa>(
+    `/playlist/${encodeURIComponent(deezerPlaylistId)}/tracks`,
+    2000
+  )
+  if (!todas) return { faixas: [], falhou: true }
+
+  const faixas = todas.flatMap((t) => {
+    if (t.id == null) return []
+    return [
+      {
+        deezer_track_id: String(t.id),
+        deezer_artist_id: t.artist?.id != null ? String(t.artist.id) : null,
+        deezer_album_id: t.album?.id != null ? String(t.album.id) : null,
+        isrc: t.isrc ?? null,
+        title: t.title || t.title_short || null,
+        artist_name: t.artist?.name ?? null,
+        album_name: t.album?.title ?? null,
+        cover_md5: extrairCoverMd5(t.album),
+        rank: typeof t.rank === 'number' ? t.rank : null,
+        readable: typeof t.readable === 'boolean' ? t.readable : null,
+        ...camposFixos(t),
+      },
+    ]
+  })
+
+  return { faixas, falhou: false }
+}
+
+export interface PlaylistDoUsuario {
+  deezer_playlist_id: string
+  title: string | null
+  nb_tracks: number | null
+  public: boolean | null
+  /** id de quem criou; a lista do perfil também traz as playlists que ele segue */
+  creator_id: string | null
+}
+
+/** As playlists públicas de um perfil do Deezer, para cadastrar as de medição. */
+export async function playlistsDoUsuario(
+  deezerUserId: string
+): Promise<{ playlists: PlaylistDoUsuario[]; falhou: boolean }> {
+  const todas = await listaInteira<{
+    id?: number
+    title?: string
+    nb_tracks?: number
+    public?: boolean
+    creator?: { id?: number }
+  }>(`/user/${encodeURIComponent(deezerUserId)}/playlists`, 100)
+  if (!todas) return { playlists: [], falhou: true }
+
+  const playlists = todas.flatMap((p) =>
+    p.id == null
+      ? []
+      : [
+          {
+            deezer_playlist_id: String(p.id),
+            title: p.title ?? null,
+            nb_tracks: typeof p.nb_tracks === 'number' ? p.nb_tracks : null,
+            public: typeof p.public === 'boolean' ? p.public : null,
+            creator_id: p.creator?.id != null ? String(p.creator.id) : null,
+          },
+        ]
+  )
+  return { playlists, falhou: false }
 }
 
 export interface ArtistaRelacionado {

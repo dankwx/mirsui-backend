@@ -1,7 +1,9 @@
 # Medição por playlist do Deezer — 22/09/2026
 
-- **Status:** investigado e testado, **não integrado**. A integração fica para
-  depois de o dono assinar o TuneMyMusic.
+- **Status:** TuneMyMusic assinado e primeiro upload feito em **16/10/2026**;
+  integração escrita na mesma data (seção 10): gateway, migration 042, etapa
+  3a da rodada e `src/scripts/cadastrarPlaylists.ts`. A seção 10 tem o teste
+  real com 6.000 faixas, que corrigiu a projeção da seção 5.
 - **Pergunta que originou:** "dá para medir todas as ~100 mil faixas do
   Observatório todo dia, e isso aguenta se o projeto crescer?"
 - **Resposta curta:** uma playlist pública do Deezer devolve o `rank` de até
@@ -288,7 +290,7 @@ fria primeiro, pela ordem da fila) vai para o dia seguinte e aparece como
 `adiadas` no log. Para voltar ao modo anterior, restaurar o backup e reiniciar
 o `mirsui-backend`.
 
-## 8. Desenho da integração (para depois)
+## 8. Desenho da integração (de 22/09; o que foi feito está na seção 10)
 
 1. **Gateway** (`src/lib/deezerGateway.ts`): aceitar `/playlist/{id}/tracks` em
    `normalizeDeezerPath` e permitir `limit` até 2.000 (ou 5.000, se o teste pendente
@@ -344,6 +346,82 @@ gabarito nas três primeiras referências de arquivo.
 As playlists de teste (`15782734641` e `15782763741`) ficam públicas no perfil
 do dono. Servem de base para a primeira rodada real depois da integração: 400
 faixas com gabarito conhecido.
+
+## 10. Primeiro upload e integração — 16/10/2026
+
+### Por que agora
+
+A rodada de 15/10 durou **19,7 h** (113.240 requisições, ~102 mil delas na
+medição) e o orçamento de 300 mil encostou na fila (299.206). Parte da demora é
+de robôs de busca varrendo páginas de faixa fora do catálogo, que chamam o
+Deezer na visita e tiram a vez do job no gateway: o site foi de ~25 mil para
+109 mil chamadas por dia entre 13 e 15/10.
+
+### O export
+
+`~/mirsui-playlists/exportar.py` (fora de git) leu as 310.873 faixas ativas,
+embaralhou de forma determinística e escreveu `teste.csv` (6.000) e
+`parte-01.csv` a `parte-07.csv` (25 playlists de 2.000 cada), mais um
+`gabarito.csv` com id, ISRC e rank de cada faixa no momento do export. Tudo em
+`~/mirsui-playlists/export-2026-10-16/`.
+
+### O teste real (6.000 faixas)
+
+O `teste.csv` foi importado com "uma playlist só" por engano. O TuneMyMusic
+cortou sozinho a cada 5.000 e chamou as partes de "My playlist" e
+"My playlist 1" (`15864469721` com 4.983 faixas e `15864505581` com 999, no
+perfil `6866594521`). Com "Separate playlists by: Playlist Name" ele respeita a
+coluna, e as partes viram playlists de 2.000.
+
+| | Faixas | |
+|---|---|---|
+| Nosso id | **5.201 (86,7%)** | 32 delas com `readable: false` |
+| Outro id, mesmo ISRC | 789 (13,2%) | 400 delas em 365 álbuns diferentes |
+| Não vieram | 10 (0,2%) | uma delas acusada de erro pelo TuneMyMusic |
+
+- **Rank exato:** 139 faixas medidas na hora por `/track/{id}`, 139 iguais ao da
+  playlist, inclusive 79 que já estavam diferentes do banco (o rank tinha
+  mudado desde a última medição). Somando setembro: 489 de 489.
+- **`limit=5000` dá HTTP 504** do próprio Deezer depois de 10 s. Com
+  `limit=2000` as três páginas da playlist de 4.983 vieram em 5,1 s, 3,5 s e
+  1,9 s, sem buraco nem repetição na paginação.
+- **As trocas não se concentram** como no teste 2 de setembro: 324 de 400 são
+  a mesma música em outra edição (single em vez de álbum, coletânea). A faixa
+  trocada costuma ficar sozinha na fila e volta a custar um `/track` inteiro.
+
+**Projeção corrigida** para o catálogo de 16/10: ~86% medidas pelas playlists
+(~156 requisições); ~43 mil pelo caminho antigo, quase todas uma a uma; mais
+~11 mil das outras etapas. **~41 a 54 mil requisições por rodada contra 113
+mil**, não os 6 a 9 mil da seção 5. Pendente: `teste-trocadas-sem-isrc.csv`,
+as 799 que não vieram pelo id, reenviadas sem ISRC para ver se o casamento por
+título, artista e álbum acerta a nossa edição.
+
+### O que foi feito no código
+
+- **Gateway:** aceita `/playlist/{id}`, `/playlist/{id}/tracks` (com `limit`
+  até 2.000, só nesse caminho) e `/user/{id}/playlists`. A página de playlist
+  tem o triplo do timeout e não entra no cache.
+- **Migration 042:** `measurement_playlists` (id, rótulo, ativa, última
+  leitura, faixas lidas, faixas medidas, última falha). Sem leitura pública.
+- **`faixasDaPlaylist`** (`deezerCatalog.ts`): pagina até o fim pelo mesmo
+  helper do álbum (`listaInteira`); qualquer página que falha derruba a
+  playlist inteira.
+- **Etapa 3a** (`medirPorPlaylist`, `catalogSnapshot.ts`): antes do álbum,
+  num `try` próprio. Casa só pelo id; sem rank ou `readable: false` volta ao
+  caminho antigo; só sai da fila o que foi gravado. Log
+  `Observatório: medição por playlist concluída` e, no resumo da rodada,
+  `medidasPorPlaylist`, `playlistsLidas`, `playlistsComFalha`,
+  `playlistFaixasLidas` e `playlistSemRank`. `OBS_MEDICAO_POR_PLAYLIST=0`
+  desliga.
+- **`src/scripts/cadastrarPlaylists.ts`:** lê cada candidata inteira e só
+  cadastra a que tem a maior parte das faixas no catálogo pelo id. Sem
+  `--gravar`, só mostra.
+- **Ensaio** sem gravar, com as duas playlists reais: 4 requisições, 11 s,
+  5.169 faixas medidas (as 5.201 pelo id menos as 32 ilegíveis) e 831
+  devolvidas ao caminho antigo.
+
+Ainda não feitos: o export semanal das faixas novas dentro do backend (item 5
+da seção 8) e a marca das trocadas para não reenviá-las (item 6).
 
 ## Fontes
 

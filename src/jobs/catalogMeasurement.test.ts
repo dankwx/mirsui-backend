@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
-import type { faixasDoAlbum } from '../lib/deezerCatalog'
+import { medirPorAlbum, medirPorPlaylist, type LinhaParaMedir } from './catalogMeasurement'
+import type { faixasDaPlaylist, faixasDoAlbum } from '../lib/deezerCatalog'
 
 const linha = (id: string, album: string | null = '10'): LinhaParaMedir => ({
   deezer_track_id: id, deezer_album_id: album, deezer_artist_id: '7',
@@ -98,4 +98,44 @@ test('a medição por álbum leva duração, explícito e prévia, e não apaga 
   assert.equal('release_date' in um, false)
   assert.equal('contributors' in um, false)
   assert.equal(dois.has_preview, null)
+})
+
+// Playlists de medição: casamento só pelo id, o resto fica para o álbum.
+const daPlaylist = (id: string, rank: number | null, readable: boolean | null = true) => ({
+  deezer_track_id: id, rank, readable, isrc: `ISRC${id}`, deezer_artist_id: '8', deezer_album_id: '80',
+  title: `Da playlist ${id}`, artist_name: 'Outro', album_name: 'Disco', cover_md5: 'b'.repeat(32),
+  duration_seconds: 200, explicit_lyrics: false, has_preview: true, release_date: null, contributors: null,
+})
+const medirTudo = async (linhas: LinhaParaMedir[], playlists: string[], consultar: typeof faixasDaPlaylist) => {
+  const lotes = []
+  for await (const lote of medirPorPlaylist(linhas, playlists, consultar)) lotes.push(lote)
+  return lotes
+}
+
+test('playlist mede pelo id, ignora quem não está na fila e devolve o resto', async () => {
+  const lotes = await medirTudo([linha('1'), linha('2'), linha('3'), linha('4')], ['p1'], async () => ({
+    falhou: false,
+    faixas: [daPlaylist('1', 100), daPlaylist('2', 0), daPlaylist('3', null), daPlaylist('4', 40, false),
+      daPlaylist('fora-da-fila', 999)],
+  }))
+  assert.equal(lotes.length, 1)
+  const [l] = lotes
+  assert.deepEqual(l.medidas.map((f) => [f.deezer_track_id, f.rank]), [['1', 100], ['2', 0]])
+  assert.equal(l.semRank, 2, 'sem rank e readable=false voltam ao caminho atual')
+  assert.equal(l.lidas, 5)
+  assert.equal(l.medidas[0].source_list, 'acervo', 'a origem é da fila, não da playlist')
+  assert.equal(l.medidas[0].deezer_album_id, '80')
+  assert.equal(l.medidas[0].cover_md5, 'b'.repeat(32))
+})
+
+test('faixa em duas playlists é medida uma vez; playlist que falha não mede nada', async () => {
+  const lotes = await medirTudo([linha('1'), linha('2')], ['p1', 'p2', 'p3'], async (id) =>
+    id === 'p3' ? { falhou: true, faixas: [] } : { falhou: false, faixas: [daPlaylist('1', 10), daPlaylist(id === 'p2' ? '2' : '1', 20)] })
+  assert.deepEqual(lotes.map((l) => [l.playlistId, l.falhou, l.medidas.map((f) => f.deezer_track_id)]),
+    [['p1', false, ['1']], ['p2', false, ['2']], ['p3', true, []]])
+})
+
+test('outra edição com o mesmo ISRC não é medida no lugar da nossa', async () => {
+  const [l] = await medirTudo([linha('1')], ['p1'], async () => ({ falhou: false, faixas: [{ ...daPlaylist('99', 5), isrc: 'ISRC1' }] }))
+  assert.deepEqual(l.medidas, [])
 })

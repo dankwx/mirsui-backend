@@ -57,7 +57,7 @@
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
 import { runCatalogDiscovery, GENEROS_FORA_DA_COLETA } from './catalogDiscovery'
-import { medirPorAlbum, type LinhaParaMedir } from './catalogMeasurement'
+import { medirPorAlbum, medirPorPlaylist, type LinhaParaMedir } from './catalogMeasurement'
 import { preencherFichaDosAlbuns } from './albumDetails'
 import { preencherFichaDosArtistas } from './artistDetails'
 import { remontarVizinhanca } from './artistNeighbors'
@@ -96,6 +96,18 @@ export interface ResultadoObservatorio {
   medidasPorFaixa: number
   /** Álbuns consultados na etapa 3, não chamadas HTTP (podem ter páginas/retries). */
   medicaoAlbunsConsultados: number
+  /**
+   * Etapa 3a (migration 042): faixas da fila medidas pelas playlists de
+   * medição, quantas playlists foram lidas inteiras, quantas falharam e
+   * quantas faixas elas entregaram. `playlistSemRank` são faixas da fila que
+   * vieram pelo id mas sem rank ou com `readable: false`, e foram para o
+   * álbum. A fila menos `medidasPorPlaylist` é o que o caminho antigo pagou.
+   */
+  medidasPorPlaylist: number
+  playlistsLidas: number
+  playlistsComFalha: number
+  playlistFaixasLidas: number
+  playlistSemRank: number
   /** faixas cujo source_list virou 'acervo' porque alguém as salvou */
   promovidasAoAcervo: number
   /** faixas que trocaram de banda de cadência nesta rodada */
@@ -229,6 +241,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     medidasPorAlbum: 0,
     medidasPorFaixa: 0,
     medicaoAlbunsConsultados: 0,
+    medidasPorPlaylist: 0,
+    playlistsLidas: 0,
+    playlistsComFalha: 0,
+    playlistFaixasLidas: 0,
+    playlistSemRank: 0,
     promovidasAoAcervo: 0,
     reclassificadas: 0,
     cadenciaLotes: 0,
@@ -313,6 +330,9 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   const orcamentoMedicao = num('OBS_ORCAMENTO_MEDICAO', 12_000)
   // OBS_LIMITE_MEDICAO continua existindo como freio manual, acima do orçamento.
   const limiteMedicao = num('OBS_LIMITE_MEDICAO', Infinity)
+  // A etapa 3a lê as playlists cadastradas em measurement_playlists. Sem
+  // nenhuma cadastrada ela não gasta nada; 0 aqui a desliga mesmo com elas.
+  const medirPorPlaylists = num('OBS_MEDICAO_POR_PLAYLIST', 1) > 0
 
   // A banda fria é o parâmetro que manda na conta (é 70% da massa num catálogo
   // maduro): custo/dia = 0,05N + 0,25N/7 + 0,70N/C_fria. Com C_fria em 30 dá
@@ -814,7 +834,72 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       filaPorBanda[banda] = (filaPorBanda[banda] ?? 0) + 1
     }
 
-    for await (const lote of medirPorAlbum(candidatas)) {
+    // 3a. As playlists de medição (migration 042, docs/medicao-por-playlist.md).
+    // Vêm antes do álbum: o que elas medem sai da fila, e o resto segue pelo
+    // caminho de sempre. No próprio try: se a leitura delas quebrar, a noite
+    // inteira cai no caminho antigo em vez de perder a medição.
+    const medidasPelaPlaylist = new Set<string>()
+    if (medirPorPlaylists) {
+      try {
+        const cadastradas = await lerFila<{ deezer_playlist_id: string }>(
+          () => db
+            .from('measurement_playlists')
+            .select('deezer_playlist_id')
+            .eq('active', true)
+            .order('deezer_playlist_id'),
+          Infinity
+        )
+        const ids = cadastradas.map((p) => p.deezer_playlist_id)
+        for await (const lote of medirPorPlaylist(candidatas, ids)) {
+          if (lote.falhou) resultado.playlistsComFalha++
+          else resultado.playlistsLidas++
+          resultado.playlistFaixasLidas += lote.lidas
+          resultado.playlistSemRank += lote.semRank
+
+          // Só sai da fila o que foi gravado. Um lote que o banco recusou volta
+          // para o álbum e para /track, que gravam de novo; medir duas vezes no
+          // mesmo dia não cria ponto (record_observations só grava mudança).
+          const falhasAntes = resultado.falhas
+          resultado.pontos += await gravar(lote.medidas, 'medicao-playlist')
+          if (resultado.falhas === falhasAntes) {
+            resultado.medidasPorPlaylist += lote.medidas.length
+            resultado.medidasIndividuais += lote.medidas.length
+            for (const f of lote.medidas) {
+              consultadasNestaRodada.add(f.deezer_track_id)
+              medidasPelaPlaylist.add(f.deezer_track_id)
+            }
+          }
+
+          const agora = new Date().toISOString()
+          const { error } = await db
+            .from('measurement_playlists')
+            .update(lote.falhou
+              ? { last_failed_at: agora }
+              : { last_read_at: agora, last_tracks: lote.lidas, last_measured: lote.medidas.length })
+            .eq('deezer_playlist_id', lote.playlistId)
+          if (error) warn({ err: error, playlist: lote.playlistId }, 'Observatório: não gravou a leitura da playlist')
+        }
+        log.info(
+          {
+            cadastradas: ids.length,
+            lidas: resultado.playlistsLidas,
+            comFalha: resultado.playlistsComFalha,
+            faixasLidas: resultado.playlistFaixasLidas,
+            medidas: resultado.medidasPorPlaylist,
+            semRank: resultado.playlistSemRank,
+            restantes: candidatas.length - medidasPelaPlaylist.size,
+          },
+          'Observatório: medição por playlist concluída'
+        )
+      } catch (err) {
+        warn({ err }, 'Observatório: medição por playlist falhou; a fila segue pelo álbum')
+      }
+    }
+    const restantes = medidasPelaPlaylist.size > 0
+      ? candidatas.filter((r) => !medidasPelaPlaylist.has(r.deezer_track_id))
+      : candidatas
+
+    for await (const lote of medirPorAlbum(restantes)) {
       resultado.medicaoAlbunsConsultados += lote.albunsConsultados
       resultado.medidasPorAlbum += lote.medidas.length
       resultado.medidasIndividuais += lote.medidas.length
@@ -846,6 +931,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       filaVencida: resultado.filaVencida,
       filaLida: resultado.filaLida,
       medidas: resultado.medidasIndividuais,
+      medidasPorPlaylist: resultado.medidasPorPlaylist,
       medidasPorAlbum: resultado.medidasPorAlbum,
       medidasPorFaixa: resultado.medidasPorFaixa,
       albunsConsultados: resultado.medicaoAlbunsConsultados,
