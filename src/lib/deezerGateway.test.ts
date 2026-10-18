@@ -114,6 +114,35 @@ test('rodízio atende usuário, Stakes e catálogo sem drenar toda a fila de bac
   assert.equal(paths.length, 22)
 })
 
+test('robô só é atendido quando não há mais nada na fila', async () => {
+  const paths: string[] = []
+  const gateway = new DeezerGateway({ intervalMs: 3, concurrency: 1,
+    fetch: (async (url) => { paths.push(String(url)); await sleep(2); return json({ id: 1 }) }) as typeof fetch })
+  // Com o gateway livre o robô sai na hora, como qualquer um.
+  assert.ok((await gateway.request('/track/899', 'crawler', 0)).ok)
+  const work = [gateway.request('/track/0', 'catalog', 0), gateway.request('/track/900', 'crawler', 0)]
+  for (let i = 1; i < 6; i++) work.push(gateway.request(`/track/${i}`, 'catalog', 0))
+  work.push(gateway.request('/artist/1', 'interactive', 0), gateway.request('/artist/2', 'stakes', 0))
+  await Promise.all(work)
+  assert.equal(paths.at(-1), 'https://api.deezer.com/track/900', 'entrou na fila antes dos outros e saiu por último')
+  assert.equal(gateway.snapshot().byPriority.crawler, 2)
+})
+
+test('robô que espera pouco desiste com o gateway ocupado; quem entra na leitura dele a promove', async () => {
+  const paths: string[] = []
+  const gateway = new DeezerGateway({ intervalMs: 3, concurrency: 1,
+    fetch: (async (url) => { paths.push(String(url)); await sleep(2); return json({ id: 1 }) }) as typeof fetch })
+  const work = Array.from({ length: 12 }, (_, i) => gateway.request(`/track/${i}`, 'catalog', 0))
+  const desistiu = await gateway.request('/track/900', 'crawler', 0, 10)
+  assert.ok(!desistiu.ok && desistiu.reason === 'queue_timeout')
+  const robo = gateway.request('/track/901', 'crawler', 0)
+  const pessoa = gateway.request('/track/901', 'interactive', 0)
+  assert.deepEqual(await robo, await pessoa)
+  await Promise.all(work)
+  assert.ok(!paths.includes('https://api.deezer.com/track/900'), 'a espera expirada não vai ao Deezer')
+  assert.ok(paths.indexOf('https://api.deezer.com/track/901') < 11, 'subiu para a vez do usuário')
+})
+
 test('pausa persistida sobrevive a uma nova instância', async () => {
   const gateway = new DeezerGateway({ initialPause: { until: Date.now() + 1000, waves: 2 },
     fetch: (async () => { assert.fail('não consultar durante pausa') }) as typeof fetch })

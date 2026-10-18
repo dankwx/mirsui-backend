@@ -12,6 +12,12 @@ a API diretamente quando o gateway está indisponível.
 - Rodízio ponderado de chamadas interativas, Stakes e catálogo (4:2:1 quando
   todas as filas têm demanda). Usuários não ficam atrás da fila inteira do job;
   o catálogo também recebe oportunidades sob tráfego interativo contínuo.
+- `crawler` (18/10/2026) fica fora do rodízio: só parte quando não há chamada
+  de nenhuma outra prioridade na fila. É a página que o site monta para robô de
+  busca (Applebot, Claude-SearchBot, Amzn-SearchBot) em faixa fora do catálogo;
+  em 16/10 esses robôs tiravam metade do gateway da rodada. O site espera 3 s
+  por ela: com o gateway ocupado a espera estoura e a página dá 404 para o
+  robô. Quem entra numa leitura em voo de prioridade menor a promove.
 - Requisições simultâneas ao mesmo caminho normalizado compartilham uma resposta.
   Busca e paginação têm parâmetros normalizados para melhorar a deduplicação.
 - Cache compartilhado de respostas bem-sucedidas: janela solicitada pelo cliente,

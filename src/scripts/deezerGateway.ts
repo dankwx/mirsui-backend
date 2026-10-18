@@ -31,7 +31,7 @@ const app = Fastify({ bodyLimit: 4096, logger: { redact: ['req.headers.authoriza
 app.get('/health', async () => ({ status: 'ok', gateway: gateway.snapshot() }))
 app.post<{ Body: { path: string; priority: DeezerPriority; maxAgeMs: number; waitMs: number } }>('/request', {
   schema: { body: { type: 'object', additionalProperties: false, required: ['path', 'priority', 'maxAgeMs', 'waitMs'],
-    properties: { path: { type: 'string', maxLength: 2048 }, priority: { enum: ['interactive', 'stakes', 'catalog'] },
+    properties: { path: { type: 'string', maxLength: 2048 }, priority: { enum: ['interactive', 'stakes', 'catalog', 'crawler'] },
       maxAgeMs: { type: 'integer', minimum: 0, maximum: 86400000 }, waitMs: { type: 'integer', minimum: 1, maximum: 120000 } } } },
 }, async (request, reply) => {
   const expected = Buffer.from(`Bearer ${token}`)

@@ -1,10 +1,16 @@
-export type DeezerPriority = 'interactive' | 'stakes' | 'catalog'
+export type DeezerPriority = 'interactive' | 'stakes' | 'catalog' | 'crawler'
 export type GatewayReply =
   | { ok: true; data: unknown; fetchedAt: number; cached: boolean }
   | { ok: false; status: number; reason: string; retryAfterMs: number }
 
 const BASE = 'https://api.deezer.com'
 const PRIORITIES: DeezerPriority[] = ['interactive', 'interactive', 'stakes', 'interactive', 'catalog', 'stakes', 'interactive']
+// `crawler` is left out of the rotation on purpose: a search robot's page
+// (Applebot, Claude-SearchBot, Amzn-SearchBot opening tracks outside the
+// catalog) only gets the gateway when nothing else is queued. On 16/10/2026
+// those robots took half the gateway from the nightly job. With the gateway
+// busy the site's short wait expires and the robot gets a 404 for that page.
+const RANK: Record<DeezerPriority, number> = { crawler: 0, catalog: 1, stakes: 2, interactive: 3 }
 
 // The measurement playlists (docs/medicao-por-playlist.md). One page of 2,000
 // tracks is ~4.4 MB and took up to 5 s on 16/10/2026; 5,000 in one page made
@@ -67,7 +73,7 @@ export class DeezerGateway {
   private readonly concurrency: number
   private readonly fetcher: typeof fetch
   readonly stats = { upstream: 0, cacheHits: 0, joined: 0, blockedWaves: 0, failures: 0,
-    byPriority: { interactive: 0, stakes: 0, catalog: 0 } }
+    byPriority: { interactive: 0, stakes: 0, catalog: 0, crawler: 0 } }
 
   constructor(private options: Options = {}) {
     this.intervalMs = options.intervalMs ?? 334
@@ -98,7 +104,7 @@ export class DeezerGateway {
       this.stats.joined++
       // An interactive read must not remain behind the catalog because it
       // happened to join the same resource after the job queued it.
-      if (priority === 'interactive' || (priority === 'stakes' && existing.priority === 'catalog')) existing.priority = priority
+      if (RANK[priority] > RANK[existing.priority]) existing.priority = priority
       return this.wait(existing.promise, waitMs)
     }
     if (this.pending.size >= (this.options.maxPending ?? 1000)) {
@@ -163,6 +169,7 @@ export class DeezerGateway {
       const priority = PRIORITIES[this.cursor++ % PRIORITIES.length]
       index = this.queue.findIndex((w) => w.priority === priority)
     }
+    // Every rotated priority was tried: what is left is crawler work.
     const work = this.queue.splice(index < 0 ? 0 : index, 1)[0]
     this.active++
     this.nextStart = now + this.intervalMs
