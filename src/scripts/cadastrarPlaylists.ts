@@ -53,9 +53,11 @@ if (unicas.length === 0) throw new Error('nenhuma playlist candidata')
 
 const { data: jaCadastradas, error: errCadastradas } = await db
   .from('measurement_playlists')
-  .select('deezer_playlist_id, active')
+  .select('deezer_playlist_id')
 if (errCadastradas) throw errCadastradas
-const ativas = new Set((jaCadastradas ?? []).filter((p) => p.active).map((p) => p.deezer_playlist_id as string))
+// Pula também as desligadas: o upsert abaixo grava active = true e religaria
+// uma playlist que alguém desligou de propósito.
+const cadastradas = new Set((jaCadastradas ?? []).map((p) => p.deezer_playlist_id as string))
 
 /** Quantos destes ids são faixas do catálogo. */
 const doCatalogo = async (ids: string[]): Promise<number> => {
@@ -86,7 +88,7 @@ for (const id of unicas) {
     titulos.set(id, meta.ok ? ((meta.data as { title?: string }).title ?? null) : null)
   }
   const titulo = titulos.get(id) ?? null
-  if (ativas.has(id)) {
+  if (cadastradas.has(id)) {
     linhas.push({ id, titulo, faixas: 0, nossas: 0, pct: 0, situacao: 'já cadastrada' })
     continue
   }
