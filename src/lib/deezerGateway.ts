@@ -105,6 +105,8 @@ export class DeezerGateway {
       // An interactive read must not remain behind the catalog because it
       // happened to join the same resource after the job queued it.
       if (RANK[priority] > RANK[existing.priority]) existing.priority = priority
+      // Nor give up at the shorter wait of whoever queued it (a robot waits 3 s).
+      existing.deadline = Math.max(existing.deadline, now + waitMs)
       return this.wait(existing.promise, waitMs)
     }
     if (this.pending.size >= (this.options.maxPending ?? 1000)) {

@@ -143,6 +143,19 @@ test('robô que espera pouco desiste com o gateway ocupado; quem entra na leitur
   assert.ok(paths.indexOf('https://api.deezer.com/track/901') < 11, 'subiu para a vez do usuário')
 })
 
+test('quem entra numa leitura de robô herda o prazo mais longo, não o do robô', async () => {
+  const gateway = new DeezerGateway({ intervalMs: 1, concurrency: 1,
+    fetch: (async (url) => { await sleep(String(url).endsWith('/track/1') ? 60 : 1); return json({ id: 1 }) }) as typeof fetch })
+  const lenta = gateway.request('/track/1', 'catalog', 0) // ocupa a única vaga por 60 ms
+  const robo = gateway.request('/track/902', 'crawler', 0, 15)
+  const pessoa = gateway.request('/track/902', 'interactive', 0, 1000)
+  const r = await robo
+  assert.ok(!r.ok && r.reason === 'queue_timeout', 'o robô desiste no prazo dele')
+  const p = await pessoa
+  assert.ok(p.ok, `a pessoa espera o prazo dela: ${JSON.stringify(p)}`)
+  await lenta
+})
+
 test('pausa persistida sobrevive a uma nova instância', async () => {
   const gateway = new DeezerGateway({ initialPause: { until: Date.now() + 1000, waves: 2 },
     fetch: (async () => { assert.fail('não consultar durante pausa') }) as typeof fetch })
