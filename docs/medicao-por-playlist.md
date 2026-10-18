@@ -421,7 +421,52 @@ título, artista e álbum acerta a nossa edição.
   devolvidas ao caminho antigo.
 
 Ainda não feitos: o export semanal das faixas novas dentro do backend (item 5
-da seção 8) e a marca das trocadas para não reenviá-las (item 6).
+da seção 8) e a marca das trocadas para não reenviá-las (item 6). Feitos em
+18/10, seção 11.
+
+## 11. A rotina das playlists — 18/10/2026
+
+Até o catálogo parar em 500 mil faixas (~06/11) entram ~9 mil por dia, e uma
+playlist só mede o que estava no CSV. A conferência de 18/10 achou 156
+playlists "Mirsui 001–156" com 310.542 faixas: 85,9% pelo id, 13,5% trocadas,
+0,5% ilegíveis, 0,2% não vieram; 18.277 faixas ativas tinham entrado depois
+do export de 16/10.
+
+**A marca por faixa** é a tabela `playlist_export_tracks` (migration 045):
+rótulo da playlist, quando foi exportada, com ou sem ISRC, e o que a última
+conferência achou (`id`, `ilegivel`, `trocada`, `nao_veio`). A rodada não
+toca nela.
+
+**O script** é `src/scripts/rotinaDasPlaylists.ts`, que substitui os `.py`
+de `~/mirsui-playlists`:
+
+1. `conferir --gravar`: lê as playlists cadastradas e marca o que cada uma
+   trouxe das faixas exportadas para ela (mesma regra da rodada: só o id).
+2. `novas <pasta>`: CSV das ativas nunca exportadas, com ISRC, "Mirsui NNN"
+   a partir da próxima livre.
+3. Subir `novas.csv` no TuneMyMusic.
+4. `cadastrarPlaylists.ts --usuario 6866594521 --gravar`.
+5. `semear <pasta>/gabarito.csv`: só aqui a marca é gravada, para que um CSV
+   que não subiu não tire faixas da exportação seguinte.
+
+`trocadas <pasta>` gera o reenvio pelo nome, sem a coluna ISRC, do que voltou
+trocado ou não veio, "Mirsui trocadas NN"; depois do upload,
+`semear ... --sem-isrc`. Uma vez por faixa: a que já foi sem ISRC (inclusive
+as 2.216 do primeiro export que não tinham ISRC) não sai de novo. O
+`cadastrarPlaylists.ts` cadastra com no mínimo 50% das faixas no catálogo pelo
+id; a "Mirsui trocadas" de 16/10 deu 57,9%, então uma playlist de trocadas
+pode precisar de `--minimo 40`.
+
+**Para começar**, uma vez e nesta ordem (o upsert deixa a última marca): `semear`
+do gabarito do export de 16/10 (`--em 2026-10-16`), das 799 do teste ("Mirsui
+trocadas", `--sem-isrc`), de `novas-2026-10-18` (`--em 2026-10-18`) e de
+`trocadas-2026-10-18` (`--sem-isrc --em 2026-10-18`), depois `conferir --gravar`.
+
+**Ensaio** num Postgres descartável com a cópia do catálogo de 18/10, um
+PostgREST local e o gateway de verdade: `semear` de 310.873 faixas em 11 s;
+`conferir` de três playlists reais deu "Mirsui trocadas" com 203 de 799 pelo
+id (25,4%, igual ao teste de 16/10) e a Mirsui 004 com 277 trocadas; `novas`
+deu as mesmas 18.277 faixas, nas mesmas playlists 157–166, que o `.py`.
 
 ## Fontes
 
