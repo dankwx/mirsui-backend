@@ -604,12 +604,14 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     // não moveria o relógio, porque o relógio é o da chamada inteira. Mesma
     // lição da 031 com a fila.
     //
-    // O lote é grande de propósito: o custo por faixa é baixo (uma junção
-    // contra três conjuntos pequenos) e o que precisa caber no relógio é a
-    // ESCRITA. 20.000 dão folga larga sobre os ~10s que derrubavam o passo
-    // quando ele tentava o catálogo inteiro de uma vez.
-    const loteCadencia = num('OBS_LOTE_CADENCIA', 20_000)
-    // 500 lotes de 20.000 são 10 milhões de faixas — 20x o teto do catálogo.
+    // O que precisa caber no relógio de 8 s é a ESCRITA: um lote que
+    // reclassifica quase tudo grava ~80% das linhas, cada uma em 12 índices.
+    // Desde a 043 o custo do lote acompanha o tamanho do lote (antes, cada
+    // lote varria a tabela inteira). Na cópia de 18/10/2026, com 200 mil
+    // faixas sem banda, 5.000 levaram até 1,1 s; 20.000, 1,5 s com o cache
+    // quente, o que na produção não dava folga.
+    const loteCadencia = num('OBS_LOTE_CADENCIA', 5_000)
+    // 500 lotes de 5.000 são 2,5 milhões de faixas — 5x o teto do catálogo.
     // O teto existe para o caso de o cursor deixar de avançar: sem ele, um
     // contrato quebrado na função viraria laço infinito segurando a rodada.
     const MAX_LOTES = 500
