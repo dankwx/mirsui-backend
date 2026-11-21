@@ -468,6 +468,38 @@ PostgREST local e o gateway de verdade: `semear` de 310.873 faixas em 11 s;
 id (25,4%, igual ao teste de 16/10) e a Mirsui 004 com 277 trocadas; `novas`
 deu as mesmas 18.277 faixas, nas mesmas playlists 157–166, que o `.py`.
 
+## 12. Fora de playlist, a cada 3 dias — 20/11/2026
+
+Em 19/11 o catálogo de 500 mil foi medido inteiro numa rodada de 6,2 h:
+360.750 faixas pelas playlists (quase de graça) e 136.989 pelo álbum e por
+`/track`, que custaram ~53 mil das 59 mil requisições da noite. Uma faixa
+fora de playlist custa ~0,4–0,5 requisição por dia; dentro, ~0,0005. As de
+fora são a edição que o TuneMyMusic trocou (~12% de cada lote, ~9% depois do
+reenvio pelo nome), as que ainda não subiram e as de uma playlist que falhou
+na noite. Medidas todo dia, elas limitam o catálogo a ~1,5 milhão de faixas
+dentro de uma rodada que caiba no dia.
+
+`OBS_CADENCIA_FORA_DE_PLAYLIST=3` mede cada uma delas um dia a cada três
+(`separarPeloTurno`, em `src/jobs/catalogMeasurement.ts`):
+
+- **Turno fixo, não "3 dias desde a última"**: no primeiro dia todas as de
+  fora tinham sido medidas na véspera e venceriam juntas, e o dia de pico
+  custaria o mesmo de antes. O turno reparte em três desde a primeira noite.
+- **Turno do álbum**: as de fora do mesmo álbum saem juntas e continuam numa
+  requisição só a `/album/{id}/tracks`.
+- **Quem tem ficha ou save** (`cadence_priority = 0`) fica todo dia. Se a
+  leitura dessa lista falhar, a noite mede todas as de fora, como antes.
+- **Se a etapa 3a falhar inteira**, a fila toda vira "fora" e é repartida em
+  três noites, em vez de ~340 mil requisições numa noite só.
+- A fila do banco não mudou: as de fora continuam vencidas todo dia e só o
+  job escolhe a vez. `espacadas` no log conta as que ficaram para o turno
+  delas; elas não entram em `adiadas`.
+
+O rank do Deezer muda a cada 2–3 dias numa faixa que se mexe, e ~95% das
+faixas não mudam num dia (medido em 22/09), então o terço do dia perde
+pouco. Com isso o limite estimado sobe para ~3 milhões de faixas; o próximo
+é o do Deezer, 2.000 playlists por conta (4 milhões a 2.000 por playlist).
+
 ## Fontes
 
 - [Deezer Content Limits](https://support.deezer.com/hc/en-gb/articles/115004522449-Deezer-Content-Limits) (atualizada em 16/06/2026)

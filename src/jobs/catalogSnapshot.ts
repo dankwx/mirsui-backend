@@ -57,7 +57,7 @@
 import { supabaseAdmin } from '../lib/supabase'
 import { popScore } from '../lib/stakePoints'
 import { runCatalogDiscovery, GENEROS_FORA_DA_COLETA } from './catalogDiscovery'
-import { medirPorAlbum, medirPorPlaylist, type LinhaParaMedir } from './catalogMeasurement'
+import { medirPorAlbum, medirPorPlaylist, separarPeloTurno, type LinhaParaMedir } from './catalogMeasurement'
 import { preencherFichaDosAlbuns } from './albumDetails'
 import { preencherFichaDosArtistas } from './artistDetails'
 import { remontarVizinhanca } from './artistNeighbors'
@@ -145,8 +145,16 @@ export interface ResultadoObservatorio {
    *
    * Um número teimosamente alto aqui significa orçamento pequeno demais para o
    * catálogo — é o sinal de subir OBS_ORCAMENTO_MEDICAO ou esfriar as bandas.
+   *
+   * Não inclui `espacadas`, que ficaram para outro dia de propósito.
    */
   adiadas: number
+  /**
+   * Faixas vencidas que a playlist não mediu e que não estavam no turno de
+   * hoje (OBS_CADENCIA_FORA_DE_PLAYLIST): ficaram para o dia do turno delas.
+   * Com cadência 3, gira em torno de 2/3 das que ficam fora de playlist.
+   */
+  espacadas: number
   isrcPreenchidos: number
   /** requisições a /album/{id}/tracks — cada uma cobre o álbum inteiro */
   isrcRequisicoesDeAlbum: number
@@ -255,6 +263,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     filaVencida: 0,
     filaLida: 0,
     adiadas: 0,
+    espacadas: 0,
     isrcPreenchidos: 0,
     isrcRequisicoesDeAlbum: 0,
     isrcResolvidosPorAlbum: 0,
@@ -333,6 +342,11 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   // A etapa 3a lê as playlists cadastradas em measurement_playlists. Sem
   // nenhuma cadastrada ela não gasta nada; 0 aqui a desliga mesmo com elas.
   const medirPorPlaylists = num('OBS_MEDICAO_POR_PLAYLIST', 1) > 0
+  // De quantos em quantos dias é medida a faixa vencida que a playlist não
+  // mediu (separarPeloTurno, em catalogMeasurement.ts). 1 é todo dia. Quem
+  // alguém acompanha fica todo dia de qualquer jeito. Ligado em 3 em
+  // 20/11/2026: o custo de medir fora de playlist é o que limita o catálogo.
+  const cadenciaForaDePlaylist = Math.max(1, num('OBS_CADENCIA_FORA_DE_PLAYLIST', 1))
 
   // A banda fria é o parâmetro que manda na conta (é 70% da massa num catálogo
   // maduro): custo/dia = 0,05N + 0,25N/7 + 0,70N/C_fria. Com C_fria em 30 dá
@@ -897,9 +911,41 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
         warn({ err }, 'Observatório: medição por playlist falhou; a fila segue pelo álbum')
       }
     }
-    const restantes = medidasPelaPlaylist.size > 0
+    const foraDaPlaylist = medidasPelaPlaylist.size > 0
       ? candidatas.filter((r) => !medidasPelaPlaylist.has(r.deezer_track_id))
       : candidatas
+
+    // O turno de quem ficou fora (OBS_CADENCIA_FORA_DE_PLAYLIST). Vale também
+    // quando a etapa 3a falha inteira: a fila toda vira "fora" e é repartida
+    // em C noites, em vez de ser pedida faixa a faixa numa noite só. Se não der
+    // para saber quem alguém acompanha, a noite mede tudo, como antes da regra.
+    let restantes = foraDaPlaylist
+    if (cadenciaForaDePlaylist > 1) {
+      try {
+        const acompanhadas = await lerFila<{ deezer_track_id: string }>(
+          () => db
+            .from('observed_tracks')
+            .select('deezer_track_id')
+            .eq('active', true)
+            .eq('cadence_priority', 0)
+            .order('deezer_track_id'),
+          Infinity
+        )
+        // O dia (UTC) de quando a rodada começou, e não o de agora: a rodada
+        // que passa da meia-noite não troca de turno no meio.
+        const dia = Math.floor(inicio / 86_400_000)
+        const turno = separarPeloTurno(
+          foraDaPlaylist,
+          dia,
+          cadenciaForaDePlaylist,
+          new Set(acompanhadas.map((r) => r.deezer_track_id))
+        )
+        restantes = turno.hoje
+        resultado.espacadas = turno.espacadas
+      } catch (err) {
+        warn({ err }, 'Observatório: não li quem é acompanhado; quem ficou fora da playlist vai inteiro hoje')
+      }
+    }
 
     for await (const lote of medirPorAlbum(restantes)) {
       resultado.medicaoAlbunsConsultados += lote.albunsConsultados
@@ -918,7 +964,10 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     }
 
     // Depois da medição, e contra o que foi medido. Ver o comentário do campo.
-    resultado.adiadas = Math.max(0, resultado.filaVencida - resultado.medidasIndividuais)
+    resultado.adiadas = Math.max(
+      0,
+      resultado.filaVencida - resultado.medidasIndividuais - resultado.espacadas
+    )
 
     // `adiadas` soma duas coisas que pedem reações opostas: o que o orçamento
     // não alcançou (subir OBS_ORCAMENTO_MEDICAO) e o que o Deezer não
@@ -939,6 +988,8 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
       albunsConsultados: resultado.medicaoAlbunsConsultados,
       filaPorBanda,
       adiadas: resultado.adiadas,
+      espacadas: resultado.espacadas,
+      cadenciaForaDePlaylist,
       foraDoOrcamento,
       naoRespondidas,
       desativadas: resultado.desativadas,

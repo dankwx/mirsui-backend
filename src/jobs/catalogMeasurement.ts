@@ -167,3 +167,48 @@ export async function* medirPorPlaylist(
     }
   }
 }
+
+/**
+ * O turno das faixas que a playlist não mediu (OBS_CADENCIA_FORA_DE_PLAYLIST).
+ *
+ * Quem está numa playlist de medição sai de graça todo dia: uma requisição
+ * mede 2.000. Quem ficou fora (a edição que o TuneMyMusic trocou, a que ainda
+ * não subiu, a de uma playlist que falhou na noite) custa ~1 requisição a cada
+ * 2 faixas, todo dia, e é isso que limita o tamanho do catálogo medido.
+ * Com cadência C, cada uma dessas faixas é medida um dia a cada C.
+ *
+ * Por turno fixo, e não por "C dias desde a última medição": no dia em que a
+ * regra entra, todas as de fora foram medidas ontem, e venceriam juntas no
+ * dia C. O dia de pico custaria o mesmo de antes e o teto não subiria. O turno
+ * reparte as de fora em C partes desde a primeira noite.
+ *
+ * O turno é do ÁLBUM, não da faixa: as faixas de fora do mesmo álbum saem no
+ * mesmo dia e continuam custando uma requisição a /album/{id}/tracks. Pelo id
+ * da faixa, um álbum com três faixas de fora pagaria uma requisição por dia
+ * em vez de uma a cada três.
+ *
+ * `sempre` são as que alguém acompanha (ficha ou save, prioridade 0 da
+ * cadência): ficam todo dia, em playlist ou não.
+ */
+export function separarPeloTurno<T extends Pick<LinhaParaMedir, 'deezer_track_id' | 'deezer_album_id'>>(
+  linhas: T[],
+  dia: number,
+  cadencia: number,
+  sempre: ReadonlySet<string>
+): { hoje: T[]; espacadas: number } {
+  if (!(cadencia > 1)) return { hoje: linhas, espacadas: 0 }
+  const hoje = linhas.filter((r) =>
+    sempre.has(r.deezer_track_id)
+    || (turnoDe(r.deezer_album_id ?? r.deezer_track_id) + dia) % cadencia === 0)
+  return { hoje, espacadas: linhas.length - hoje.length }
+}
+
+/** FNV-1a de 32 bits: espalha ids sequenciais do Deezer por igual entre os turnos. */
+function turnoDe(chave: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < chave.length; i++) {
+    h ^= chave.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
