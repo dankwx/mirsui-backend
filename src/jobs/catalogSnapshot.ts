@@ -199,6 +199,8 @@ export interface ResultadoObservatorio {
   descobertaSemelhancas: number
   /** álbuns que a caminhada deixou de colher por gênero fora da coleta */
   descobertaAlbunsForaDoGenero: number
+  /** música funcional que a descoberta deixou de trazer (ehMusicaFuncional) */
+  descobertaFuncionais: number
   /**
    * Etapa 6 (migration 041): a vizinhança dos artistas, de onde saem as
    * "Parecidas" da página de faixa. Só SQL. `vizinhancaArtistas` é quantos
@@ -286,6 +288,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     descobertaFronteira: 0,
     descobertaSemelhancas: 0,
     descobertaAlbunsForaDoGenero: 0,
+    descobertaFuncionais: 0,
     vizinhancaPares: 0,
     vizinhancaArtistas: 0,
     vizinhancaDiretos: 0,
@@ -1219,6 +1222,7 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     resultado.descobertaFronteira = descoberta.fronteiraAntes
     resultado.descobertaSemelhancas = descoberta.semelhancas
     resultado.descobertaAlbunsForaDoGenero = descoberta.albunsForaDoGenero
+    resultado.descobertaFuncionais = descoberta.funcionaisDescartadas
     resultado.pontos += descoberta.pontos
   } catch (err) {
     resultado.falhas++

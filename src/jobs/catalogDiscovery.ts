@@ -123,6 +123,12 @@ export interface ResultadoDescoberta {
   albunsForaDoGenero: number
   /** artistas esgotados porque a página inteira era de gênero fora */
   artistasForaDoGenero: number
+  /**
+   * Música funcional (white noise, sono, meditação, relaxamento; ver
+   * ehMusicaFuncional) que a descoberta deixou de trazer: artistas da
+   * fronteira, álbuns da caminhada e faixas do rádio, somados.
+   */
+  funcionaisDescartadas: number
   // --- o que sobrou das respostas (041) ---
   /** pares de artistas gravados em artist_similarity, das duas fontes */
   semelhancas: number
@@ -190,7 +196,58 @@ export function separarPorGenero<A extends { genre_id: number | null }>(
   return { colher, fora, artistaFora: fora.length > 0 && colher.length === 0 }
 }
 
-const inteiroNaoNegativo = (valor: string | undefined, padrao: number) => {
+/**
+ * Música funcional fora da coleta (20/11/2026, pedido do usuário): white
+ * noise, som de chuva, música para dormir, meditar, relaxar, spa, estudo.
+ * No Deezer ela vem com gênero "Pop", então não dá para barrar pelo gênero
+ * como a clássica; vai pelo nome do artista e do álbum. São artistas com
+ * milhares de faixas genéricas (Sleep Songs 101 tinha 2.655 no catálogo), e
+ * a caminhada por álbum adora artista de discografia grande.
+ *
+ * Só expressões que não aparecem em música de verdade. As palavras soltas
+ * ficam de fora de propósito: "sleep" pegaria Sleep Token e Sleeping At Last,
+ * "relax" o single do Frankie Goes to Hollywood, "meditations" o Coltrane e
+ * The Meditations, "yoga" a Yoga Lin. O que escapar daqui sai pela lista de
+ * blocked_artists, que a limpeza do catálogo alimenta.
+ */
+const TERMOS_FUNCIONAIS = [
+  // ruído e frequência
+  'white noise', 'brown noise', 'pink noise', 'ru[ií]do branco', 'ruido blanco', 'bruit blanc',
+  'binaura\\p{L}*', 'isochronic', 'solfeggio', '\\d+ ?hz',
+  // dormir
+  'sleep music', 'sleeping music', 'sleep sounds', 'sleep songs', 'deep sleep', 'baby sleep',
+  'music for sleep\\p{L}*', 'sounds for sleep\\p{L}*', 'sleep meditation',
+  'para dormir', 'pour dormir', 'zum schlafen',
+  'lullab\\p{L}*', 'can[çc]\\p{L}* de ninar', 'm[úu]sica\\p{L}* de ninar', 'berceuse\\p{L}*',
+  // relaxar
+  'relaxing', 'relaxation', 'relaxante\\p{L}*', 'relajante\\p{L}*', 'relajaci[óo]n', 'relaxamento',
+  'para relaxar', 'para relajarse', 'entspannung\\p{L}*',
+  // meditar
+  'meditation music', 'music for meditation', 'guided meditation', 'meditation sounds',
+  'deep meditation', 'm[úu]sica para meditar', 'medita[çc][ãa]o guiada', 'meditaci[óo]n guiada',
+  'reiki', 'chakra\\p{L}*', 'mindfulness', 'kundalini', 'singing bowls?', 'tibetan bowls?',
+  'yoga music', 'music for yoga', 'yoga meditation',
+  // spa, estudo, natureza, terapia
+  'spa music', 'spa relaxation', 'massage music', 'massage therapy',
+  'study music', 'music for studying', 'focus music', 'concentration music',
+  'm[úu]sica para estudar', 'm[úu]sica para estudiar',
+  'nature sounds', 'sounds of nature', 'sons da natureza', 'sonidos de la naturaleza',
+  'rain sounds', 'sounds of rain', 'thunderstorm sounds', 'ocean sounds',
+  'asmr', 'tinnitus', 'stress relief', 'anxiety relief',
+  'calming (?:music|sounds|piano)', 'healing (?:music|sounds|frequenc\\p{L}*)',
+  'sound therapy', 'music therapy',
+]
+const FUNCIONAL = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${TERMOS_FUNCIONAIS.join('|')})(?![\\p{L}\\p{N}])`,
+  'iu'
+)
+
+/** Algum dos nomes (artista, álbum) é de música funcional? */
+export function ehMusicaFuncional(...nomes: (string | null | undefined)[]): boolean {
+  return nomes.some((n) => n != null && FUNCIONAL.test(n))
+}
+
+const inteiroNaoNegativo =(valor: string | undefined, padrao: number) => {
   if (valor == null || valor.trim() === '') return padrao
   const n = Number(valor)
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : padrao
@@ -339,6 +396,7 @@ const vazio = (catalogoAtivoAntes = 0, orcamento = 0): ResultadoDescoberta => ({
   fronteiraSementes: 0,
   albunsForaDoGenero: 0,
   artistasForaDoGenero: 0,
+  funcionaisDescartadas: 0,
   semelhancas: 0,
 })
 
@@ -487,6 +545,11 @@ async function caminhadaPorAlbum(
       const candidatos = artistas
         .filter((a) => a.nb_fan != null && a.nb_fan <= config.maxFas)
         .filter((a) => !bloqueados.has(a.deezer_artist_id))
+        .filter((a) => {
+          if (!ehMusicaFuncional(a.artist_name)) return true
+          resultado.funcionaisDescartadas++
+          return false
+        })
         .sort((x, y) => (x.nb_fan ?? 0) - (y.nb_fan ?? 0))
         .slice(0, config.relacionadosPorSemente)
 
@@ -539,6 +602,22 @@ async function caminhadaPorAlbum(
   for (const artista of fila) {
     if (colhidas.length >= alvo || resultado.albumRequisicoes >= maxRequisicoes) break
 
+    // Quem já está na fronteira e é bloqueado ou de música funcional sai dela
+    // esgotado, sem gastar a requisição da discografia: antes do bloqueio, a
+    // caminhada pedia a página e jogava fora todas as faixas, toda noite.
+    const funcional = ehMusicaFuncional(artista.artist_name)
+    if (funcional || bloqueados.has(artista.deezer_artist_id)) {
+      if (funcional) resultado.funcionaisDescartadas++
+      progresso.push({
+        deezer_artist_id: artista.deezer_artist_id,
+        next_album_index: artista.next_album_index,
+        albums_total: artista.albums_total,
+        exhausted: true,
+      })
+      resultado.albumArtistasExauridos++
+      continue
+    }
+
     resultado.albumRequisicoes++
     const { albuns, total, falhou } = await albunsDoArtista(
       artista.deezer_artist_id,
@@ -572,8 +651,15 @@ async function caminhadaPorAlbum(
 
     // Álbum de gênero fora da coleta nem é pedido: o gênero vem na
     // discografia, que já foi paga. Ver GENEROS_FORA_DA_COLETA.
-    const { colher, fora, artistaFora } = separarPorGenero(uteis)
+    const { colher: doGenero, fora, artistaFora } = separarPorGenero(uteis)
     resultado.albunsForaDoGenero += fora.length
+
+    // Álbum de música funcional também não é pedido. Página que só tinha
+    // isso esgota o artista, como a de gênero fora.
+    const colher = doGenero.filter((a) => !ehMusicaFuncional(a.title))
+    const albunsFuncionais = doGenero.length - colher.length
+    resultado.funcionaisDescartadas += albunsFuncionais
+    const artistaFuncional = albunsFuncionais > 0 && colher.length === 0
 
     const faixasPorAlbum = await Promise.all(
       colher.map(async (album) => ({ album, ...(await faixasDoAlbum(album.deezer_album_id)) }))
@@ -590,6 +676,10 @@ async function caminhadaPorAlbum(
         // também para a contagem do log bater com o que o banco gravou.
         if (!f.title || !f.artist_name || f.rank == null) continue
         if (f.deezer_artist_id && bloqueados.has(f.deezer_artist_id)) continue
+        if (ehMusicaFuncional(f.artist_name)) {
+          resultado.funcionaisDescartadas++
+          continue
+        }
         resultado.albumFaixasColhidas++
         if (conhecidas.has(f.deezer_track_id)) continue
         conhecidas.add(f.deezer_track_id)
@@ -626,7 +716,7 @@ async function caminhadaPorAlbum(
     }
 
     const consumidos = artista.next_album_index + albuns.length
-    const esgotado = artistaFora || consumidos >= total
+    const esgotado = artistaFora || artistaFuncional || consumidos >= total
     progresso.push({
       deezer_artist_id: artista.deezer_artist_id,
       next_album_index: consumidos,
@@ -665,6 +755,7 @@ async function caminhadaPorAlbum(
       novas: resultado.albumNovas,
       albunsForaDoGenero: resultado.albunsForaDoGenero,
       artistasForaDoGenero: resultado.artistasForaDoGenero,
+      funcionaisDescartadas: resultado.funcionaisDescartadas,
     },
     'Descoberta: caminhada por álbum concluída'
   )
@@ -837,7 +928,17 @@ export async function runCatalogDiscovery(
       continue
     }
 
-    const pool = new Map(radio.faixas.map((faixa) => [faixa.deezer_track_id, faixa]))
+    // O rádio não traz gênero, mas traz artista e álbum: a música funcional sai
+    // aqui, uma vez por resposta (e não uma vez por semente que a examinasse).
+    const pool = new Map(
+      radio.faixas
+        .filter((faixa) => {
+          if (!ehMusicaFuncional(faixa.artist_name, faixa.album_name)) return true
+          resultado.funcionaisDescartadas++
+          return false
+        })
+        .map((faixa) => [faixa.deezer_track_id, faixa])
+    )
 
     for (const semente of grupo) {
       paisMarcados.push(semente.deezer_track_id)
