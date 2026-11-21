@@ -516,13 +516,22 @@ async function caminhadaPorAlbum(
 
     resultado.fronteiraSementes = porArtista.size
 
-    const respostas = await Promise.all(
-      [...porArtista.entries()].map(async ([artistId, grupo]) => ({
-        artistId,
-        grupo,
-        ...(await relacionadosDoArtista(artistId)),
-      }))
-    )
+    // Em blocos de 250, pelo mesmo motivo do rádio (BLOCO_RADIO): o gateway
+    // drena ~360 requisições nos 120 s que cada uma espera na fila. Com a
+    // fronteira mínima de 600 isto nunca passava de algumas dezenas; com a
+    // meta de 50 mil faixas por noite (20/11/2026) a fronteira precisa de
+    // milhares de artistas, e o reabastecimento de uma vez estouraria a espera.
+    const BLOCO_RELACIONADOS = 250
+    const pedirRelacionados = async ([artistId, grupo]: [string, Semente[]]) => ({
+      artistId,
+      grupo,
+      ...(await relacionadosDoArtista(artistId)),
+    })
+    const entradas = [...porArtista.entries()]
+    const respostas: Awaited<ReturnType<typeof pedirRelacionados>>[] = []
+    for (let i = 0; i < entradas.length; i += BLOCO_RELACIONADOS) {
+      respostas.push(...(await Promise.all(entradas.slice(i, i + BLOCO_RELACIONADOS).map(pedirRelacionados))))
+    }
 
     const jaVistos = new Set<string>()
     const semelhancas: LinhaDeSemelhanca[] = []
