@@ -1,5 +1,5 @@
 -- psql -v ON_ERROR_STOP=1 -f src/jobs/vizinhanca.sql.test.sql
--- Exercita a migration 041 dentro de uma transação revertida.
+-- Exercita as migrations 041 e 048 dentro de uma transação revertida.
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '120s';
@@ -7,6 +7,11 @@ set local statement_timeout = '120s';
 \ir ../../migrations/041_vizinhanca_dos_artistas.sql
 -- Segunda aplicação também deve ser segura.
 \ir ../../migrations/041_vizinhanca_dos_artistas.sql
+
+-- A 048 troca a soma dos pares por fases e lotes (041 -> 048, como na
+-- produção). Duas vezes também.
+\ir ../../migrations/048_pares_de_artistas_em_lotes.sql
+\ir ../../migrations/048_pares_de_artistas_em_lotes.sql
 
 -- A remontagem do fim da migration deixou as tabelas temporárias dela nesta
 -- transação, com dono admin; a service role não as derruba. Na rodada cada
@@ -89,11 +94,48 @@ begin
   if n <> 0 then raise exception 'lixo gravou: % linhas', n; end if;
 end $$;
 
--- 2. Os pares e a vizinhança, pelo caminho da rodada: pares, depois lotes.
+-- 2. Os pares e a vizinhança, pelo caminho da rodada: as duas partes das
+-- arestas, os pares em lotes e depois a vizinhança em lotes. Um par velho de
+-- cada lado do corte prova que o lote troca o que é dele e só isso.
+insert into public.artist_pairs (a, b, score)
+values (9990001996, 9990001001, 9),  -- 9990001996 % 3 = 1: é do lote 1
+       (9990001998, 9990001001, 9);  -- 9990001998 % 3 = 0: é do lote 0
 set local role service_role;
-select public.rebuild_artist_pairs();
+select public.stage_artist_pairs(0);
+select public.stage_artist_pairs(1);
+select public.rebuild_artist_pairs(1, 3);
+reset role;
+do $$
+begin
+  if exists (select 1 from public.artist_pairs where a = 9990001996) then
+    raise exception 'par velho do lote 1 sobreviveu';
+  end if;
+  if not exists (select 1 from public.artist_pairs where a = 9990001998) then
+    raise exception 'o lote 1 apagou par do lote 0';
+  end if;
+  begin
+    perform public.rebuild_artist_pairs(3, 3);
+    raise exception 'lote de pares fora do intervalo passou';
+  exception when raise_exception then
+    if sqlerrm not like 'lote 3 de 3%' then raise; end if;
+  end;
+  begin
+    perform public.stage_artist_pairs(2);
+    raise exception 'parte 2 das arestas passou';
+  exception when raise_exception then
+    if sqlerrm not like 'parte 2 não existe%' then raise; end if;
+  end;
+end $$;
+set local role service_role;
+select public.rebuild_artist_pairs(l, 3) from generate_series(0, 2) l;
 select public.rebuild_artist_neighbors(l, 3) from generate_series(0, 2) l;
 reset role;
+do $$
+begin
+  if exists (select 1 from public.artist_pairs where a in (9990001996, 9990001998)) then
+    raise exception 'par velho sobreviveu à remontagem';
+  end if;
+end $$;
 
 do $$
 declare p record; v text;
@@ -202,8 +244,23 @@ begin
   exception when insufficient_privilege then null;
   end;
   begin
+    perform 1 from public.artist_pair_edges limit 1;
+    raise exception 'anon leu artist_pair_edges';
+  exception when insufficient_privilege then null;
+  end;
+  begin
     perform public.rebuild_artist_neighbors(0, 1);
     raise exception 'anon remontou a vizinhança';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.stage_artist_pairs(0);
+    raise exception 'anon juntou as arestas';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.rebuild_artist_pairs(0, 1);
+    raise exception 'anon somou os pares';
   exception when insufficient_privilege then null;
   end;
   begin
