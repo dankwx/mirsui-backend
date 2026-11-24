@@ -50,6 +50,67 @@ async function datasDeEntrada(admin: SupabaseClient, ids: readonly string[]): Pr
   return datas
 }
 
+// ---- Saltos de audiência (migrations/052_notas_de_salto.sql) ----
+
+const STATUS_DOS_SALTOS = ['pendente', 'publicado', 'ignorado', 'expirado'] as const
+type StatusDoSalto = (typeof STATUS_DOS_SALTOS)[number]
+
+interface CorpoDaNota {
+  texto?: unknown
+  fonte_url?: unknown
+  fonte_nome?: unknown
+}
+
+/**
+ * Confere o que o painel mandou antes de chegar ao banco. O banco confere de
+ * novo (checks da 052), mas aqui o erro sai em português para o dono, em vez
+ * do nome de uma constraint.
+ */
+function lerNota(corpo: CorpoDaNota): { texto: string; fonteUrl: string | null; fonteNome: string | null } | string {
+  const texto = typeof corpo.texto === 'string' ? corpo.texto.trim() : ''
+  if (!texto) return 'Escreva a nota.'
+  if (texto.length > 600) return 'A nota passou de 600 caracteres.'
+
+  const url = typeof corpo.fonte_url === 'string' ? corpo.fonte_url.trim() : ''
+  if (url) {
+    let ok = false
+    try {
+      const u = new URL(url)
+      ok = (u.protocol === 'http:' || u.protocol === 'https:') && !/\s/.test(url)
+    } catch {
+      ok = false
+    }
+    if (!ok) return 'O link da fonte precisa começar com http:// ou https://.'
+  }
+
+  const nome = typeof corpo.fonte_nome === 'string' ? corpo.fonte_nome.trim() : ''
+  if (nome.length > 80) return 'O nome da fonte passou de 80 caracteres.'
+
+  return { texto, fonteUrl: url || null, fonteNome: nome || null }
+}
+
+function lerIds(valor: unknown): number[] | null {
+  if (!Array.isArray(valor) || valor.length === 0 || valor.length > 100) return null
+  const ids = valor.map(Number)
+  return ids.every(n => Number.isSafeInteger(n) && n > 0) ? ids : null
+}
+
+/**
+ * `raise exception` das funções da 052 chega como P0001, com a mensagem já
+ * escrita para o dono. O resto é erro nosso.
+ */
+function respostaDoBanco(
+  app: FastifyInstance,
+  reply: FastifyReply,
+  error: { code?: string; message: string },
+  contexto: string
+) {
+  if (error.code === 'P0001') return reply.code(409).send({ error: error.message })
+  if (error.code === '23514') return reply.code(400).send({ error: 'O banco recusou a nota. Confira o texto e o link.' })
+  app.log.error({ err: error }, contexto)
+  return reply.code(500).send({ error: 'Erro no banco. Tente de novo.' })
+}
+
 export default async function adminRoutes(app: FastifyInstance) {
   // ---- Estado geral do projeto, para o painel do dono ----
   //
@@ -233,6 +294,111 @@ export default async function adminRoutes(app: FastifyInstance) {
       if (erroStorage) app.log.warn({ err: erroStorage, profileId: id }, 'Usuário apagado, mas o avatar ficou no Storage')
 
       return reply.send({ success: true, id, image_file: semeado.image_file })
+    }
+  )
+
+  // ---- Saltos de audiência: a fila do painel e as notas ----
+  //
+  // A detecção roda no fim da rodada (etapa 7 de catalogSnapshot.ts). Aqui o
+  // dono lê a fila, publica a nota de um ou mais saltos, edita, tira do ar ou
+  // ignora. Tudo pelas funções da 052, executáveis só pela service_role.
+
+  app.get<{ Querystring: { status?: string } }>(
+    '/admin/saltos',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const admin = porta(app, request, reply)
+      if (!admin) return
+
+      const pedido = request.query.status as StatusDoSalto | undefined
+      const status: StatusDoSalto = pedido && STATUS_DOS_SALTOS.includes(pedido) ? pedido : 'pendente'
+
+      const { data, error } = await admin.rpc('saltos_do_painel', { p_status: status, p_limite: 300 })
+      if (error) return respostaDoBanco(app, reply, error, 'Erro ao ler a fila de saltos')
+      return reply.send({ status, ...(data as object) })
+    }
+  )
+
+  app.post<{ Body: CorpoDaNota & { saltos?: unknown } }>(
+    '/admin/saltos/notas',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const admin = porta(app, request, reply)
+      if (!admin) return
+
+      const corpo = request.body ?? {}
+      const saltos = lerIds(corpo.saltos)
+      if (!saltos) return reply.code(400).send({ error: 'Escolha pelo menos um salto.' })
+      const nota = lerNota(corpo)
+      if (typeof nota === 'string') return reply.code(400).send({ error: nota })
+
+      const { data, error } = await admin.rpc('publicar_nota_de_salto', {
+        p_saltos: saltos,
+        p_texto: nota.texto,
+        p_fonte_url: nota.fonteUrl,
+        p_fonte_nome: nota.fonteNome,
+      })
+      if (error) return respostaDoBanco(app, reply, error, 'Erro ao publicar a nota de salto')
+      return reply.send(data)
+    }
+  )
+
+  app.patch<{ Params: { id: string }; Body: CorpoDaNota }>(
+    '/admin/saltos/notas/:id',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const admin = porta(app, request, reply)
+      if (!admin) return
+
+      const id = Number(request.params.id)
+      if (!Number.isSafeInteger(id) || id <= 0) return reply.code(404).send({ error: 'Nota não encontrada' })
+      const nota = lerNota(request.body ?? {})
+      if (typeof nota === 'string') return reply.code(400).send({ error: nota })
+
+      const { data, error } = await admin.rpc('editar_nota_de_salto', {
+        p_nota: id,
+        p_texto: nota.texto,
+        p_fonte_url: nota.fonteUrl,
+        p_fonte_nome: nota.fonteNome,
+      })
+      if (error) return respostaDoBanco(app, reply, error, 'Erro ao editar a nota de salto')
+      return reply.send(data)
+    }
+  )
+
+  app.delete<{ Params: { id: string } }>(
+    '/admin/saltos/notas/:id',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const admin = porta(app, request, reply)
+      if (!admin) return
+
+      const id = Number(request.params.id)
+      if (!Number.isSafeInteger(id) || id <= 0) return reply.code(404).send({ error: 'Nota não encontrada' })
+
+      const { data, error } = await admin.rpc('tirar_nota_de_salto', { p_nota: id })
+      if (error) return respostaDoBanco(app, reply, error, 'Erro ao tirar a nota de salto')
+      return reply.send(data)
+    }
+  )
+
+  app.post<{ Body: { saltos?: unknown; status?: unknown } }>(
+    '/admin/saltos/status',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const admin = porta(app, request, reply)
+      if (!admin) return
+
+      const corpo = request.body ?? {}
+      const saltos = lerIds(corpo.saltos)
+      if (!saltos) return reply.code(400).send({ error: 'Escolha pelo menos um salto.' })
+      if (corpo.status !== 'ignorado' && corpo.status !== 'pendente') {
+        return reply.code(400).send({ error: 'Status inválido.' })
+      }
+
+      const { data, error } = await admin.rpc('marcar_saltos', { p_saltos: saltos, p_status: corpo.status })
+      if (error) return respostaDoBanco(app, reply, error, 'Erro ao mudar o status dos saltos')
+      return reply.send(data)
     }
   )
 }

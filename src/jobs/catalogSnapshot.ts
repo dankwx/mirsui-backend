@@ -211,6 +211,13 @@ export interface ResultadoObservatorio {
   vizinhancaArtistas: number
   vizinhancaDiretos: number
   vizinhancaSegundo: number
+  /**
+   * Etapa 7 (migration 052): os saltos de audiência que entram na fila do
+   * painel (/admin/saltos). `saltosNovos` abriu item; `saltosCrescidos` só
+   * atualizou um pendente que continuou subindo.
+   */
+  saltosNovos: number
+  saltosCrescidos: number
   desativadas: number
   falhas: number
 }
@@ -293,6 +300,8 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
     vizinhancaArtistas: 0,
     vizinhancaDiretos: 0,
     vizinhancaSegundo: 0,
+    saltosNovos: 0,
+    saltosCrescidos: 0,
     desativadas: 0,
     falhas: 0,
   }
@@ -1244,6 +1253,24 @@ export async function runCatalogSnapshot(logger?: Log): Promise<ResultadoObserva
   } catch (err) {
     resultado.falhas++
     log.error({ err }, 'Observatório: etapa da vizinhança falhou')
+  }
+
+  // -------------------------------------------------------------------------
+  // 7. Os saltos para o painel do dono
+  // -------------------------------------------------------------------------
+  // Ver migrations/052_notas_de_salto.sql. Por último porque lê o que a
+  // medição de hoje gravou. Olha os três últimos dias (o padrão da função):
+  // uma noite perdida não deixa salto para trás, e repetir não duplica. Só
+  // SQL, ~0,5 s; não passa pelo gateway.
+  try {
+    const { data, error } = await db.rpc('detectar_saltos')
+    if (error) throw error
+    const saltos = (data ?? {}) as { novos?: number; crescidos?: number }
+    resultado.saltosNovos = saltos.novos ?? 0
+    resultado.saltosCrescidos = saltos.crescidos ?? 0
+  } catch (err) {
+    resultado.falhas++
+    log.error({ err }, 'Observatório: etapa dos saltos falhou')
   }
 
   const deezer = contadoresDeezer()
