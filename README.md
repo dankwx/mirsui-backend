@@ -53,6 +53,11 @@ O servidor sobe em `http://0.0.0.0:3000` (configurável via `PORT`).
 | `SEED_IMAGENS_DIR` | Não | Pasta com os JPEGs para os perfis semeados (padrão: `/home/ubuntu/imagens`). Foto usada é movida para `usadas/` dentro dela — nunca repete |
 | `OPENROUTER_API_KEY` | Só para `seed:perfis`/`seed:ia` | Chave do OpenRouter que escolhe as faixas e escreve a bio dos perfis semeados |
 | `OPENROUTER_MODEL` | Não | Modelo no OpenRouter (padrão: `tencent/hy4-preview` — ~US$ 0,0004 por perfil com o raciocínio desligado) |
+| `RESEND_API_KEY` | Para os avisos por e-mail | Chave da API do Resend. Sem ela os avisos ficam desligados (o log diz "Avisos por e-mail desligados") e nada mais muda. Ver **migration 053** e `src/jobs/notificacoes.ts` |
+| `NOTIF_LIMITE_DIA` | Não | Teto de avisos por 24 h (padrão: `80`). O plano gratuito do Resend dá 100 por dia, divididos com os e-mails de login do GoTrue; o que passar fica na fila para o dia seguinte |
+| `NOTIF_REMETENTE` | Não | Remetente dos avisos (padrão: `Mirsui <noreply@mirsui.com>`) |
+| `NOTIF_ATIVA` | Não | `0` desliga os avisos mesmo com a chave |
+| `SITE_URL` | Não | Origem dos links dos e-mails (padrão: `https://www.mirsui.com`) |
 
 O servidor **não sobe** sem `SUPABASE_URL` e `SUPABASE_KEY` (validado em `src/lib/supabase.ts`).
 
@@ -64,6 +69,11 @@ busca — enriquecimento, não requisito. Ver
 [`docs/plano-independencia-do-spotify.md`](docs/plano-independencia-do-spotify.md).
 
 ### Jobs diários
+
+- **A cada 30 s — avisos por e-mail:** entrega a caixa de saída `notificacoes`.
+  O aviso de novo seguidor nasce no gatilho de `followers` e sai em até 30 s;
+  o resumo semanal das faixas salvas que subiram é gerado na segunda, depois
+  da rodada (ou na terça, se a segunda passar sem backend). Ver migration 053.
 
 - **05:00 — Observatório:** atualiza charts, mede o catálogo, completa o ISRC
   (que é o endereço das páginas do site) e, por último, descobre faixas

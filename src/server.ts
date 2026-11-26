@@ -4,6 +4,7 @@ import { runStakeSnapshot } from './jobs/stakeSnapshot'
 import { runCatalogSnapshot } from './jobs/catalogSnapshot'
 import { pingHealthcheck } from './lib/healthcheck'
 import { supabaseAdmin } from './lib/supabase'
+import { agendarNotificacoes } from './jobs/notificacoes'
 
 const port = Number(process.env.PORT) || 3000
 
@@ -147,6 +148,14 @@ function conferirSemQuebrar() {
 // 05:30 não deve esperar até 06:07 para descobrir que perdeu a janela.
 cron.schedule('7 * * * *', conferirSemQuebrar, AGENDA)
 setTimeout(conferirSemQuebrar, 60_000).unref()
+
+// Avisos por e-mail: novo seguidor na hora e o resumo semanal dos saltos, que
+// espera a rodada da segunda. Ver src/jobs/notificacoes.ts.
+agendarNotificacoes({
+  db: supabaseAdmin,
+  log: app.log,
+  rodadaEmCurso: () => observatorioRodando,
+})
 
 try {
   await app.listen({ port, host: '0.0.0.0' })
