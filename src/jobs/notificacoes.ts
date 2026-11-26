@@ -2,7 +2,8 @@
 //
 // O banco decide O QUE avisar (migrations/053_notificacoes.sql): o gatilho de
 // `followers` cria o aviso de seguidor no momento do seguir, e
-// `gerar_resumo_de_saltos` cria o resumo da semana. Aqui só se entrega.
+// `gerar_resumo_de_saltos` cria o resumo da semana. O site mostra os avisos
+// no sino do header (054). Aqui só se entrega por e-mail e se gera o resumo.
 //
 // ENTREGA — a cada 30 s
 //   Reivindica as pendentes, monta o e-mail, manda pelo Resend e fecha cada
@@ -176,32 +177,41 @@ export function agendarNotificacoes(opts: {
   rodadaEmCurso: () => boolean
 }) {
   const { db, log, rodadaEmCurso } = opts
-  const apiKey = process.env.RESEND_API_KEY
-  if (process.env.NOTIF_ATIVA === '0' || !apiKey || !db) {
-    log.warn(
-      { chave: Boolean(apiKey), serviceRole: Boolean(db), desligada: process.env.NOTIF_ATIVA === '0' },
-      'Avisos por e-mail desligados'
-    )
+  if (!db) {
+    log.warn({}, 'Avisos desligados: falta SUPABASE_SERVICE_ROLE_KEY')
     return
   }
 
-  const site = (process.env.SITE_URL || 'https://www.mirsui.com').replace(/\/+$/, '')
-  const enviar = criarEnvioResend(apiKey, process.env.NOTIF_REMETENTE || 'Mirsui <noreply@mirsui.com>')
-  const limiteDia = Number(process.env.NOTIF_LIMITE_DIA) || 80
+  // Entrega por e-mail. Sem a chave do Resend os avisos continuam nascendo e
+  // aparecendo no sino do site; só não saem por e-mail.
+  const apiKey = process.env.RESEND_API_KEY
+  let entregar = () => {}
+  if (process.env.NOTIF_ATIVA === '0' || !apiKey) {
+    log.warn(
+      { chave: Boolean(apiKey), desligada: process.env.NOTIF_ATIVA === '0' },
+      'Avisos por e-mail desligados'
+    )
+  } else {
+    const site = (process.env.SITE_URL || 'https://www.mirsui.com').replace(/\/+$/, '')
+    const enviar = criarEnvioResend(apiKey, process.env.NOTIF_REMETENTE || 'Mirsui <noreply@mirsui.com>')
+    const limiteDia = Number(process.env.NOTIF_LIMITE_DIA) || 80
 
-  let entregando = false
-  const entregar = () => {
-    if (entregando) return
-    entregando = true
-    entregarNotificacoes({ db, enviar, site, limiteDia, log })
-      .catch((err) => log.error({ err }, 'Avisos: entrega falhou'))
-      .finally(() => {
-        entregando = false
-      })
+    let entregando = false
+    entregar = () => {
+      if (entregando) return
+      entregando = true
+      entregarNotificacoes({ db, enviar, site, limiteDia, log })
+        .catch((err) => log.error({ err }, 'Avisos: entrega falhou'))
+        .finally(() => {
+          entregando = false
+        })
+    }
+    setInterval(entregar, 30_000).unref()
+    setTimeout(entregar, 10_000).unref()
+    log.info({ site, limiteDia }, 'Avisos por e-mail ligados')
   }
-  setInterval(entregar, 30_000).unref()
-  setTimeout(entregar, 10_000).unref()
 
+  // Resumo semanal: vale para o sino e para o e-mail.
   let semanaGerada: string | null = null
   const conferirResumo = () => {
     const agora = agoraEmSaoPaulo()
@@ -218,6 +228,4 @@ export function agendarNotificacoes(opts: {
   // :37 fica longe do :07 da rede de segurança do Observatório
   cron.schedule('37 * * * *', conferirResumo, { timezone: FUSO, recoverMissedExecutions: true })
   setTimeout(conferirResumo, 90_000).unref()
-
-  log.info({ site, limiteDia }, 'Avisos por e-mail ligados')
 }
